@@ -68,9 +68,36 @@ python3 -m venv .venv
 
 ## 输出文件说明
 
-跑完一次分析，`out/<视频名>/` 里会有：
+跑完一次分析，`out/<视频名>/` 的结构是：
 
-### 数据
+```
+out/GX010046/
+├── dashboard.html          ← 双击打开，圈速 / G 值 / 弯道分析全在里面
+├── GX010046_hud.mp4        ← 带 HUD 的叠加视频（需要加 --overlay）
+├── charts/                 图表
+│   ├── lap_times.png
+│   ├── speed_trace.png
+│   ├── delta.png
+│   ├── gg_diagram.png
+│   ├── track_map.png
+│   └── corner_apex.png
+└── tables/                 数据表
+    ├── laps.csv
+    ├── corners.csv
+    ├── laps_aligned_speed.csv
+    ├── laps_aligned_glat.csv
+    ├── telemetry.csv
+    └── analysis.json
+```
+
+**先看 `dashboard.html`。** 它是唯一入口，故意放在最外层 —— 结论、图表、明细表
+都在这一页里，页尾还有指向下面那些文件的快捷入口，不用自己翻目录找。
+
+之所以把图表和数据表分到子目录：一次分析会产出十几个文件，平铺在一层里
+你每次都要在一堆 CSV 中间找那张想看的图。分开之后，"想发朋友圈"去 `charts/`，
+"想自己做透视表"去 `tables/`，各取各的。
+
+### 数据表 `tables/`
 
 | 文件 | 内容 |
 |---|---|
@@ -81,7 +108,9 @@ python3 -m venv .venv
 | `corners.csv` | 弯道 × 圈 的明细：顶点速度、进出口速度、最大横向 G、刹车点位置 |
 | `analysis.json` | 上面所有内容的结构化版本，方便喂给别的工具 |
 
-### 图表（PNG）
+> 加了 `--no-csv` 就不会生成 `tables/`，看板页尾对应的入口也会自动消失（不会留死链接）。
+
+### 图表 `charts/`
 
 | 文件 | 看什么 |
 |---|---|
@@ -92,11 +121,11 @@ python3 -m venv .venv
 | `track_map.png` | 赛道俯视图，按速度着色，标出起点线和各弯 |
 | `corner_apex.png` | 逐弯顶点速度对比。柱子差得越多，说明这个弯开得越不稳定 |
 
-### 交互式
+### 最外层
 
 | 文件 | 说明 |
 |---|---|
-| `dashboard.html` | 单文件网页看板。双击就能打开，数据已内嵌，不需要服务器 |
+| `dashboard.html` | 单文件网页看板，**分析的入口**。双击就能打开，数据已内嵌，不需要服务器 |
 | `<视频名>_hud.mp4` | 带 HUD 的叠加视频（需要加 `--overlay`） |
 
 ---

@@ -188,29 +188,33 @@ def main(argv: list[str] | None = None) -> int:
     outdir = args.out / source_name
     outdir.mkdir(parents=True, exist_ok=True)
 
+    # 输出按用途分类，避免十几个文件平铺在一层里找不着北：
+    #   charts/   图表
+    #   tables/   数据表（CSV + JSON）
+    #   最外层    只留"入口文件" dashboard.html（以及可选的 HUD 视频）——
+    #             用户打开输出目录第一眼就该看到它，而不是在一堆 CSV 里翻。
+    charts_dir = outdir / "charts"
+    tables_dir = outdir / "tables"
+
     report.print_report(sa)
 
+    tables_written: list[Path] = []
     if not args.no_csv:
-        written = report.export_csv(sa, outdir)
-        p = report.export_json(sa, outdir / "analysis.json")
-        print("\n— 数据导出 —")
-        for f in [*written, p]:
-            print(f"  {f}")
+        tables_written = report.export_csv(sa, tables_dir)
+        tables_written.append(report.export_json(sa, tables_dir / "analysis.json"))
 
+    figs: list[Path] = []
     if not args.no_charts:
-        figs = charts.make_all(sa, outdir)
-        if figs:
-            print("\n— 图表 —")
-            for f in figs:
-                print(f"  {f}")
+        figs = charts.make_all(sa, charts_dir)
 
+    html: Path | None = None
     if not args.no_dashboard:
         html = dashboard.build(sa, outdir / "dashboard.html")
-        print(f"\n— 网页看板 —\n  {html}")
 
     # ------------------------------------------------------------------
     # HUD 叠加视频
     # ------------------------------------------------------------------
+    out_video: Path | None = None
     if args.overlay:
         if video_path is None:
             # 演示模式下没有源视频，临时生成一段测试画面
@@ -233,9 +237,20 @@ def main(argv: list[str] | None = None) -> int:
             show_trace=not args.no_trace,
             verbose=True,
         )
-        print(f"\n— HUD 视频 —\n  {out_video}")
 
+    # ------------------------------------------------------------------
+    # 输出目录一览
+    # ------------------------------------------------------------------
+    # 只列"该看哪个"，不把十几个文件名全铺出来 —— 目录结构已经说明了一切。
     print(f"\n全部输出位于：{outdir}")
+    if html is not None:
+        print("  dashboard.html   ← 双击打开，圈速 / G 值 / 弯道分析全在里面")
+    if figs:
+        print(f"  charts/          {len(figs)} 张图（想单独看大图就用这些）")
+    if tables_written:
+        print(f"  tables/          {len(tables_written)} 个数据文件（Excel / pandas 可直接打开）")
+    if out_video is not None:
+        print(f"  {out_video.name:<17}带 HUD 的叠加视频")
     return 0
 
 

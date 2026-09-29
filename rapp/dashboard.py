@@ -77,6 +77,14 @@ _TEMPLATE = r"""<!DOCTYPE html>
         padding:11px 14px;border-radius:8px;font-size:12.5px;margin-bottom:16px;line-height:1.7;}
   .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;
         background:#232a33;color:var(--dim);margin-left:6px;}
+  /* “其他文件”区块：指向 charts/ 与 tables/ 里的产物 */
+  section h3{margin:15px 0 7px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.4px;}
+  section h3:first-of-type{margin-top:4px;}
+  .files{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:5px 18px;}
+  .files a{display:block;color:var(--fg);text-decoration:none;font-size:12.5px;
+           padding:5px 9px;border-radius:7px;border:1px solid transparent;}
+  .files a:hover{background:#1c2430;border-color:var(--line);}
+  .files a span{color:var(--dim);margin-left:8px;font-size:11.5px;}
 </style>
 </head>
 <body>
@@ -134,7 +142,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="scroll"><table id="tLap"></table></div>
   </section>
 
-</div>
+__FILES__</div>
 
 <script>
 const DATA = __DATA__;
@@ -442,6 +450,57 @@ def _subsample(arr: np.ndarray, n: int) -> np.ndarray:
     return arr[idx]
 
 
+# 输出目录里图表 / 数据表的文件名 → 一句话说明。
+# 看板只放"结论"，细节大图和原始数据留在这些文件里，所以页尾要给出入口。
+_CHART_FILES = [
+    ("lap_times.png", "圈速分布"),
+    ("speed_trace.png", "速度—距离曲线"),
+    ("delta.png", "相对最快圈的时间差"),
+    ("gg_diagram.png", "G-G 摩擦圆"),
+    ("track_map.png", "赛道俯视图"),
+    ("corner_apex.png", "逐弯顶点速度"),
+]
+_TABLE_FILES = [
+    ("laps.csv", "每圈汇总"),
+    ("corners.csv", "弯道 × 圈 明细"),
+    ("laps_aligned_speed.csv", "距离对齐的速度"),
+    ("laps_aligned_glat.csv", "距离对齐的横向 G"),
+    ("telemetry.csv", "全场高频遥测"),
+    ("analysis.json", "结构化结果，喂给别的工具"),
+]
+
+
+def _file_index(outdir: Path) -> str:
+    """
+    生成页尾的"其他文件"区块。
+
+    按磁盘上**实际存在**的文件来列，所以加了 --no-charts / --no-csv
+    之后不会留下点不开的死链接；一个都没有时整块不输出。
+    """
+    groups: list[str] = []
+    for folder, title, items in (
+        ("charts", "图表（点开看大图）", _CHART_FILES),
+        ("tables", "数据表（Excel / pandas 可直接打开）", _TABLE_FILES),
+    ):
+        links = "".join(
+            f'<a href="{folder}/{name}">{name}<span>{desc}</span></a>'
+            for name, desc in items
+            if (outdir / folder / name).exists()
+        )
+        if links:
+            groups.append(f"<h3>{title}</h3><div class=\"files\">{links}</div>")
+    if not groups:
+        return ""
+    return (
+        "  <section>\n"
+        "    <h2>其他文件</h2>\n"
+        '    <p class="hint">这一页只放结论。想要单张大图发朋友圈，或者拿原始数据自己做表，'
+        "从下面拿 —— 它们都在本文件旁边的子目录里。</p>\n"
+        "    " + "\n    ".join(groups) + "\n"
+        "  </section>\n\n"
+    )
+
+
 def _cards(sa: ana.SessionAnalysis) -> str:
     ls = sa.lapset
     t = ls.telemetry
@@ -636,6 +695,7 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
         .replace("__NLAPS__", str(len(ls.laps)))
         .replace("__DIST__", f"{float(t.dist[-1]):.0f}" if t else "—")
         .replace("__DATE__", __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"))
+        .replace("__FILES__", _file_index(path.parent))
     )
     path.write_text(html, encoding="utf-8")
 
