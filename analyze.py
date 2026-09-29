@@ -79,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-trace", action="store_true", help="HUD 里不画速度曲线小图")
 
     p.add_argument("--list-streams", action="store_true", help="只列出视频里的遥测流，不做分析")
+    p.add_argument("--g-source", choices=("grav", "calib"), default="grav",
+                   help="重力从哪来：grav=用 GRAV 流逐时刻扣（默认）；calib=老的三步标定")
     p.add_argument("--selftest", action="store_true", help="用合成数据自检整条流水线")
     p.add_argument("-q", "--quiet", action="store_true", help="少打印一些中间信息")
 
@@ -170,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         if not video_path.exists():
             print(f"找不到文件：{video_path}", file=sys.stderr)
             return 2
-        tel = telemetry.load(video_path, verbose=verbose)
+        tel = telemetry.load(video_path, verbose=verbose, g_source=args.g_source)
         source_name = video_path.stem
 
     # ------------------------------------------------------------------

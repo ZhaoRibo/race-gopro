@@ -330,7 +330,7 @@ def make(
     )
     tel.warnings.clear()
 
-    telemetry.attach_imu(tel, t_imu, f_cam, gyro=omega, grav=g_cam)
+    telemetry.attach_imu(tel, t_imu, f_cam, gyro=omega, grav=g_cam, t_grav=t_imu)
 
     truth = {
         "mount_pitch_deg": mount_pitch,

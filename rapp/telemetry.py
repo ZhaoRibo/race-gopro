@@ -321,9 +321,19 @@ def attach_imu(
     acc: np.ndarray | None,
     gyro: np.ndarray | None = None,
     grav: np.ndarray | None = None,
+    t_grav: np.ndarray | None = None,
+    *,
+    g_source: str = "grav",
 ) -> Telemetry:
     """
-    把 IMU 数据挂到 Telemetry 上：标定安装角 → 生成纵向 / 横向 G 值。
+    把 IMU 数据挂到 Telemetry 上：扣重力 → 生成纵向 / 横向 G 值。
+
+    g_source 决定重力从哪来：
+        'grav'  —— 用 GRAV 流**逐时刻**扣重力（默认）。相机自己融合的重力方向
+                   会跟着相机转，所以录制中途相机被碰、支架有弹性、传感器温漂
+                   都能自动跟上，不需要任何标定步骤。
+        'calib' —— 老路线：靠陀螺仪主轴整场定一个固定重力方向，再用 GPS 对齐
+                   低频直流。留作对照。
 
     没有加速度计（或数据不可用）时自动退回"只用 GPS 求导"的方案，
     此时 G 值分辨率会掉到 GPS 的采样率，但至少不会整个流程跑不下去。
@@ -338,12 +348,34 @@ def attach_imu(
                 gps_x=tel.x, gps_y=tel.y, grav=grav, gyro=gyro,
             )
             gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
+            has_ref = float(np.std(gl)) > 1e-3 and float(np.std(gt)) > 1e-3
+
+            # GPS 推算的平面加速度模长 sqrt((dv/dt)² + (v·ω)²) —— 与坐标系无关，
+            # 用来识别 GRAV 的轴约定、并作为扣重力是否干净的判据。
+            # 注意乘 G0 换成 m/s²：gravity_from_grav() 要拿它和加速度计的模长比
+            # 较，单位不一致的话“模长比”这个判据就失效了（gps_derived_g 输出的是 g）。
+            ref_mag = imu.G0 * np.hypot(
+                geo.savgol(tel.t, gl, 0.5, 2), geo.savgol(tel.t, gt, 0.5, 2)
+            )
+
+            gravity = None
+            grav_est = None
+            if g_source == "grav" and grav is not None and t_grav is not None \
+                    and np.asarray(grav).size >= 9:
+                grav_est = imu.gravity_from_grav(
+                    acc, t_imu, grav, t_grav,
+                    speed_at_acc=geo.interp_to(tel.t, tel.speed, t_imu),
+                    ref_mag=geo.interp_to(tel.t, ref_mag, t_imu) if has_ref else None,
+                )
+                gravity = grav_est.vector
 
             # 有可用的 GPS 参考量就投影到**速度坐标系**（正解）；否则退回固定车身轴。
             # 那条退路上纵向 G 基本等于噪声（见 velocity_frame_g 的说明），必须提醒。
-            if float(np.std(gl)) > 1e-3 and float(np.std(gt)) > 1e-3:
-                a_long, a_lat = imu.velocity_frame_g(acc, t_imu, cal, tel.t, gl, gt)
-                cal.projection = "velocity"
+            if has_ref:
+                a_long, a_lat = imu.velocity_frame_g(
+                    acc, t_imu, cal, tel.t, gl, gt, gravity=gravity
+                )
+                cal.projection = "grav" if gravity is not None else "velocity"
             else:
                 a_long, a_lat = imu.project(acc, t_imu, cal, cutoff_hz=7.0, in_g=True)
                 cal.projection = "body"
@@ -351,6 +383,21 @@ def attach_imu(
                     "没有可用的 GPS 参考量，退回按固定车身轴投影；"
                     "卡丁车漂移时侧滑角会污染纵向 G，此时纵向读数不可信。"
                 )
+
+            if grav_est is not None:
+                # 标定那套（陀螺仪主轴定重力、拟合偏航角、对齐低频直流）是给
+                # 固定车身轴路线用的，改用 GRAV 后这些数字不再参与计算。
+                # 把它们的提示清掉，只留 GRAV 自己的判断结果，
+                # 否则用户会看到"有 0.25 g 直流偏移，已对齐"这种已经不成立的话。
+                cal.gravity_mag = grav_est.magnitude
+                cal.gravity_source = "GRAV 流（逐时刻）"
+                cal.notes[:] = [
+                    n for n in cal.notes
+                    if not n.startswith("标定质量")
+                    and "GRAV 与加速度计的轴约定" not in n
+                    and "低频直流偏移" not in n
+                ]
+                cal.notes.insert(0, grav_est.describe())
             # 标定内部那几条"标定质量"提示是针对**固定车身轴**诊断的，
             # 输出已经改用速度坐标系，留着会自相矛盾
             cal.notes[:] = [n for n in cal.notes if not n.startswith("标定质量")]
@@ -404,11 +451,14 @@ def attach_imu(
     return tel
 
 
-def load(mp4_path: str | Path, *, verbose: bool = True) -> Telemetry:
+def load(mp4_path: str | Path, *, verbose: bool = True, g_source: str = "grav") -> Telemetry:
     """
     从 GoPro MP4 加载完整遥测。
 
     这是整个工具链的入口，对应 `read_streams()` + 清洗 + 标定的封装。
+
+    g_source 见 `attach_imu()`：'grav' 用 GRAV 流逐时刻扣重力（默认），
+    'calib' 用老的三步标定路线。
     """
     mp4_path = Path(mp4_path)
     warns: list[str] = []
@@ -487,6 +537,8 @@ def load(mp4_path: str | Path, *, verbose: bool = True) -> Telemetry:
         acc,
         gyro=gyro_sel[1] if gyro_sel else None,
         grav=grav_stream.physical() if grav_stream is not None else None,
+        t_grav=grav_stream.times if grav_stream is not None else None,
+        g_source=g_source,
     )
 
     if verbose:

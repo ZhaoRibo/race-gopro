@@ -52,6 +52,7 @@ GoPro 的 `ACCL` 流给出的是**相机自己坐标系**下的三轴加速度�
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
@@ -68,6 +69,156 @@ CAL_FILTER_HZ = 4.0
 实测同一份数据，不滤波时标定质量 0.09，先低通是 0.85。
 4Hz 保留了刹车/转向动作（0~5Hz），足以覆盖卡丁车的驾驶动态。
 """
+
+
+def _signed_permutations() -> tuple[np.ndarray, ...]:
+    """全部 48 个「带符号的置换矩阵」（3 个轴的 6 种排法 × 每种轴 2 个符号）。
+
+    为什么要老老实实枚举，而不是写死一个换轴公式：
+        GRAV 与 ACCL 的轴约定**并不相同**。实测同一台 HERO11 的两段素材里，
+        GRAV 恰好把 ACCL 的前两个分量对调了 —— 注意这是一个**转置**，
+        det = −1，**不是旋转**。所以「求一个旋转矩阵」的思路（SVD/Kabsch）
+        从原理上就找不到它，只能枚举符号置换。
+        不同固件 / 机型还可能不同，因此这里不写死，让数据自己说话。
+    """
+    out: list[np.ndarray] = []
+    for perm in itertools.permutations(range(3)):
+        for signs in itertools.product((1.0, -1.0), repeat=3):
+            m = np.zeros((3, 3))
+            for i, (j, sg) in enumerate(zip(perm, signs)):
+                m[i, j] = sg
+            out.append(m)
+    return tuple(out)
+
+
+_GRAV_AXIS_CANDIDATES = _signed_permutations()
+
+
+@dataclass
+class GravityEstimate:
+    """由 GRAV 流求出的**逐时刻**重力矢量。"""
+
+    vector: np.ndarray
+    """(N, 3) 重力矢量，单位 m/s²，已经换算到 ACCL 的坐标系、长度对齐 t_acc。"""
+
+    axis_map: np.ndarray
+    """(3, 3) GRAV → ACCL 的轴变换。正常是某个带符号置换矩阵（det 可能是 −1）。"""
+
+    magnitude: float
+    """有效重力大小 m/s²。由 mean(acc · 重力方向) 求得，
+    顺带把加速度计的标度误差一起校掉了（实测 9.90~9.93）。"""
+
+    axis_score: float
+    """轴映射判据的得分（越高越好）。"""
+
+    axis_corr: float
+    """扣重力后加速度模长与 GPS 平面加速度模长的相关系数。"""
+
+    axis_ratio: float
+    """两者模长之比的中位数。理想 = 1。"""
+
+    def describe(self) -> str:
+        return (f"GRAV 轴变换 det={np.linalg.det(self.axis_map):+.0f}，"
+                f"判据得分 {self.axis_score:.3f}"
+                f"（r={self.axis_corr:+.3f}，模长比 {self.axis_ratio:.3f}）")
+
+
+def gravity_from_grav(
+    acc: np.ndarray,
+    t_acc: np.ndarray,
+    grav: np.ndarray,
+    t_grav: np.ndarray,
+    *,
+    speed_at_acc: np.ndarray | None = None,
+    ref_mag: np.ndarray | None = None,
+) -> GravityEstimate:
+    """
+    把 GRAV 流变成**逐时刻的重力矢量** —— 这是"仅用 GRAV 扣重力"的核心一步。
+
+    为什么逐时刻比"整个录制定一个固定重力方向"好：
+        GRAV 是相机自己融合出来的重力方向，它跟着相机一起转。所以即使相机在
+        录制中途被人碰了一下、或支架有弹性、或传感器温漂，它也能自动跟上 ——
+        而固定方向的做法会把那一次扰动**永久**留在后半段数据里。
+
+    轴约定：GRAV 和 ACCL 的轴序不一样（实测是前两个分量对调，见
+    `_signed_permutations` 的说明），所以不能直接相减。这里用物理判据自动挑：
+        正确的换轴 → 扣掉重力后剩下的动态加速度，其模长应该与 GPS 独立算出的
+        平面加速度模长 sqrt((dv/dt)² + (v·ω)²) 高度相关，且两者量级接近。
+        错误的换轴会在数据里留下 1 g 以上的虚假"重力残差"，
+        相关系数明显下降、模长比明显偏离 1。实测正解 r≈0.72~0.84、比值 1.04~1.10，
+        次优解比值就跳到 1.2 以上。
+
+    参数
+    ----
+    ref_mag : 可选，(N,) GPS 推算的平面加速度模长（对齐 t_acc），
+              **单位必须是 m/s²**（要拿它和加速度计的模长比），
+              即 sqrt((dv/dt)² + (v·ω)²) 本身，不要先除以 g。
+              不给就跳过自动识别、退回「前两个分量对调」这一实测默认值。
+    """
+    acc = np.asarray(acc, dtype=np.float64)
+    t_acc = np.asarray(t_acc, dtype=np.float64)
+    grav = np.asarray(grav, dtype=np.float64).reshape(-1, 3)
+    t_grav = np.asarray(t_grav, dtype=np.float64)
+
+    acc_f = geo.lowpass(t_acc, acc, CAL_FILTER_HZ)
+    g_on_acc = np.column_stack(
+        [geo.interp_to(t_grav, grav[:, k], t_acc) for k in range(3)]
+    )
+    g_norm = np.linalg.norm(g_on_acc, axis=1, keepdims=True)
+    g_hat = g_on_acc / np.where(g_norm > 1e-9, g_norm, 1.0)
+
+    if speed_at_acc is None:
+        moving = np.ones(t_acc.size, dtype=bool)
+    else:
+        moving = np.asarray(speed_at_acc, dtype=np.float64) > 3.0
+    if int(moving.sum()) < 200:
+        moving = np.ones(t_acc.size, dtype=bool)
+
+    # 默认值：实测把前两个分量对调（真实素材上验证过）。只有在没有 GPS 参考量
+    # 时才用它，否则下面的枚举一定会重新选一次。
+    swap01 = np.array([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    best: tuple[float, np.ndarray, float, float, float] | None = None
+
+    if ref_mag is not None and int(moving.sum()) > 500:
+        ref = np.asarray(ref_mag, dtype=np.float64)
+        for m in _GRAV_AXIS_CANDIDATES:
+            u = g_hat @ m.T
+            # 重力大小：竖直方向的动态分量在一圈里平均为零，
+            # 所以 mean(acc·上方向) 就等于 g
+            g_eff = float(np.mean(np.sum(acc_f[moving] * u[moving], axis=1)))
+            if g_eff <= 4.0:  # 方向反了或映射错了
+                continue
+            dyn = acc_f - g_eff * u
+            dyn = dyn - np.sum(dyn * u, axis=1)[:, None] * u  # 去掉竖直残留
+            mag = geo.savgol(t_acc, np.linalg.norm(dyn, axis=1), 0.5, 2)
+            r = _corr(mag[moving], ref[moving])
+            ratio = float(np.median(mag[moving]) / max(np.median(ref[moving]), 1e-9))
+            # 相关性越高、量级越接近 1 越好；量级偏离用相对量惩罚，
+            # 这样 r 只差一点点时不会因为比值差一倍而误选
+            score = r / (1.0 + abs(ratio - 1.0))
+            if best is None or score > best[0]:
+                best = (score, m, g_eff, r, ratio)
+
+    if best is None:
+        m = swap01
+        u = g_hat @ m.T
+        g_eff = float(np.mean(np.sum(acc_f[moving] * u[moving], axis=1)))
+        if g_eff <= 4.0:  # 连默认映射都不对，退成不换轴并把符号正过来
+            m = np.eye(3)
+            u = g_hat @ m.T
+            g_eff = abs(float(np.mean(np.sum(acc_f[moving] * u[moving], axis=1))))
+        best = (float("nan"), m, g_eff, float("nan"), float("nan"))
+
+    score, axis_map, g_eff, r, ratio = best
+    g_dir = g_hat @ axis_map.T
+    return GravityEstimate(
+        vector=g_dir * g_eff,
+        axis_map=axis_map,
+        magnitude=g_eff,
+        axis_score=score,
+        axis_corr=r,
+        axis_ratio=ratio,
+    )
 
 
 def _corr(a: np.ndarray, b: np.ndarray) -> float:
@@ -134,20 +285,29 @@ class MountCalibration:
     notes: list[str]
 
     def describe(self) -> str:
-        proj = ("速度坐标系（纵向/横向按**速度方向**分解）"
-                if self.projection == "velocity"
-                else "固定车身轴（**退化方案**，纵向 G 不可信）")
+        proj = {
+            "grav": "速度坐标系 + **逐时刻** GRAV 扣重力",
+            "velocity": "速度坐标系（纵向/横向按**速度方向**分解）",
+            "body": "固定车身轴（**退化方案**，纵向 G 不可信）",
+        }.get(self.projection, self.projection)
         lines = [
             f"重力大小      : {self.gravity_mag:.3f} m/s²  (理论 9.807)",
             f"重力来源      : {self.gravity_source}",
             f"输出投影      : {proj}",
-            f"安装偏航角    : {np.degrees(self.yaw):+.1f}°",
             f"G 值一致性    : {self.quality:.3f}   "
             f"(横向 r={self.lateral_r:+.3f} / 纵向 r={self.longitudinal_r:+.3f})",
-            f"低频直流修正  : 纵向 {self.dc_long:+.3f} / 横向 {self.dc_lat:+.3f} m/s² "
-            f"({np.hypot(self.dc_long, self.dc_lat) / G0:.3f} g)",
             f"横向符号约定  : 正值 = {'左转' if self.lateral_sign > 0 else '右转'}",
         ]
+        # 走 GRAV 逐时刻路线时，下面这些量是"固定车身轴"那套标定算出来的，
+        # 已经不再参与 G 值计算。留着会让人误以为它们在起作用，所以整段不打印。
+        if self.projection == "grav":
+            return "\n".join(lines) + "\n" + "\n".join(f"提示: {n}" for n in self.notes)
+
+        lines.append(f"安装偏航角    : {np.degrees(self.yaw):+.1f}°")
+        lines.append(
+            f"低频直流修正  : 纵向 {self.dc_long:+.3f} / 横向 {self.dc_lat:+.3f} m/s² "
+            f"({np.hypot(self.dc_long, self.dc_lat) / G0:.3f} g)"
+        )
         if np.isfinite(self.tilt_disagreement_deg):
             lines.append(f"候选方向最大夹角: {self.tilt_disagreement_deg:.1f}°")
         if len(self.candidates) > 1:
@@ -503,6 +663,7 @@ def velocity_frame_g(
     a_long_gps: np.ndarray,
     a_lat_gps: np.ndarray,
     *,
+    gravity: np.ndarray | None = None,
     direction_seconds: float = 0.8,
     cutoff_hz: float = 7.0,
     in_g: bool = True,
@@ -534,6 +695,17 @@ def velocity_frame_g(
     ----
     a_long_gps, a_lat_gps : `gps_derived_g()` 的输出（单位 g，这里只取方向，单位无所谓）
 
+    gravity : 可选，(N, 3) **逐时刻**重力矢量（m/s²，和 acc 同一坐标系、同一时间轴），
+              由 `gravity_from_grav()` 给出。给了就用它扣重力 —— 这是"仅用 GRAV"的
+              简化路线；不给就退回用 `cal` 里那个整场固定的重力方向 + 低频直流对齐。
+
+    【两条路线的差别】
+        `cal` 路线：重力方向由陀螺仪主轴在一次标定里定死，再靠 GPS 补低频直流。
+                    好处是不依赖 GRAV 流；坏处是整场只能有一个重力方向。
+        `gravity` 路线：GRAV 是相机自己融合的，逐时刻都跟着相机转，
+                    天然免疫"录制中途相机被碰了一下 / 支架有弹性 / 温漂"。
+                    也没有低频直流可对齐 —— 重力已经逐时刻扣干净了。
+
     已知残留误差
     ------------
     · 幅度标定在 ±10% 量级（实测逐圈斜率 1.04~1.41）。根源不是本模块，
@@ -548,8 +720,17 @@ def velocity_frame_g(
 
     # 平面加速度矢量：先低通压掉振动，再去掉重力、只留水平分量
     acc_f = geo.lowpass(t_acc, acc, CAL_FILTER_HZ)
-    dyn = acc_f - cal.up_hat * cal.gravity_mag if cal.accel_has_gravity else acc_f.copy()
-    dyn = dyn - np.outer(dyn @ cal.up_hat, cal.up_hat)
+    if gravity is not None:
+        # 逐时刻重力（GRAV 路线）。"上方向"也逐时刻取，所以只减掉沿重力方向的
+        # 分量 —— 车在弯里侧倾时，真实的水平面是跟着变的。
+        g_vec = np.asarray(gravity, dtype=np.float64)
+        gn = np.linalg.norm(g_vec, axis=1, keepdims=True)
+        up = g_vec / np.where(gn > 1e-9, gn, 1.0)
+        dyn = acc_f - g_vec
+        dyn = dyn - np.sum(dyn * up, axis=1)[:, None] * up
+    else:
+        dyn = acc_f - cal.up_hat * cal.gravity_mag if cal.accel_has_gravity else acc_f.copy()
+        dyn = dyn - np.outer(dyn @ cal.up_hat, cal.up_hat)
     mag = np.linalg.norm(dyn, axis=1)
 
     # 方向：对 (dv/dt, v·ω) 这个**二维向量**做平滑再取单位方向。
@@ -610,4 +791,12 @@ def gps_derived_g(
     return a_long, a_lat
 
 
-__all__ = ["MountCalibration", "calibrate", "gps_derived_g", "project", "velocity_frame_g"]
+__all__ = [
+    "GravityEstimate",
+    "MountCalibration",
+    "calibrate",
+    "gps_derived_g",
+    "gravity_from_grav",
+    "project",
+    "velocity_frame_g",
+]
