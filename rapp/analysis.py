@@ -194,7 +194,7 @@ class SessionAnalysis:
                     "max_lat_g": round(l.max_lat_g, 2),
                     "max_brake_g": round(l.max_brake_g, 2),
                     "max_accel_g": round(l.max_accel_g, 2),
-                    "full_throttle_pct": round(l.full_throttle_pct, 1),
+                    "accel_time_pct": round(l.accel_time_pct, 1),
                 }
                 for l in ls.laps
             ],

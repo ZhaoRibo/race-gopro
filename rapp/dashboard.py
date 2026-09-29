@@ -415,7 +415,7 @@ function speedColor(s, lo, hi) {
 
   // ---- 逐圈明细表 ----
   const lHead = ["圈号","圈时","Δ最快"].concat(DATA.sector_labels)
-    .concat(["里程","极速","最慢","平均速","最大横G","最大刹车G","全油门"]);
+    .concat(["里程","极速","最慢","平均速","最大横G","最大刹车G","加速时间占比"]);
   let h2 = "<thead><tr>" + lHead.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
   for (const l of DATA.laps) {
     const delta = l.duration_s - BEST.duration_s;
@@ -430,7 +430,7 @@ function speedColor(s, lo, hi) {
     row += td(l.length_m.toFixed(0), cls) + td(l.max_speed_kmh.toFixed(1), cls);
     row += td(l.min_speed_kmh.toFixed(1), cls) + td(l.avg_speed_kmh.toFixed(1), cls);
     row += td(l.max_lat_g.toFixed(2), cls) + td(l.max_brake_g.toFixed(2), cls);
-    row += td(l.full_throttle_pct.toFixed(0) + "%", cls);
+    row += td(l.accel_time_pct.toFixed(0) + "%", cls);
     h2 += row + "</tr>";
   }
   document.getElementById("tLap").innerHTML = h2 + "</tbody>";
@@ -609,7 +609,7 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
             "avg_speed_kmh": round(float(np.mean(lap.speed)) * 3.6, 1),
             "max_lat_g": round(lap.max_lat_g, 2),
             "max_brake_g": round(lap.max_brake_g, 2),
-            "full_throttle_pct": round(lap.full_throttle_pct, 1),
+            "accel_time_pct": round(lap.accel_time_pct, 1),
             "speed_kmh": [round(float(v), 2) for v in lap.speed[gi] * 3.6],
             "delta_s": [round(float(v), 3) for v in dl[gi]],
         })

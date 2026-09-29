@@ -135,8 +135,13 @@ class Lap:
     max_lat_g: float = 0.0
     max_brake_g: float = 0.0
     max_accel_g: float = 0.0
-    full_throttle_pct: float = 0.0
-    """纵向 G 为正的时间占比，近似"全油门时间占比"。"""
+    accel_time_pct: float = 0.0
+    """本圈“纵向 G 为正”的时间占比。
+
+    【别当成全油门】GoPro 测不到油门开度。而且卡丁车漂移时车体系纵向加速度里
+    混着一项 -v·ω·sinβ（能到 ±0.8 g），所以这个数主要反映“加速过程占了多久”，
+    与油门开度没有对应关系。原先叫 full_throttle_pct 是个误导。
+    """
 
     valid: bool = True
     """是否计入稳定性统计。False 表示这是出场圈之类的非正常圈。"""
@@ -649,7 +654,9 @@ def _build_grid(tel: telemetry.Telemetry, gate: Gate, crossing_times: np.ndarray
         lap.max_lat_g = float(np.max(np.abs(lap.a_lat)))
         lap.max_brake_g = float(abs(np.min(lap.a_long)))
         lap.max_accel_g = float(np.max(lap.a_long))
-        lap.full_throttle_pct = float(np.mean(lap.a_long > 0.0) * 100.0)
+        # 只统计“纵向 G 为正”的时间占比。不要叫它全油门 —— GoPro 测不到
+        # 油门开度，而且纵向 G 里还混着侧滑项 -v·ω·sinβ，与油门无对应关系。
+        lap.accel_time_pct = float(np.mean(lap.a_long > 0.0) * 100.0)
 
         laps.append(lap)
 
