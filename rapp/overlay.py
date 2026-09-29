@@ -20,9 +20,13 @@ Pillow 可以直接调用 FreeType 渲染系统字体，写出带抗锯齿的真
 HUD 布局（以 1080p 为基准，其它分辨率按高度等比缩放）
     左上：圈号 / 本圈计时 / 与最快圈的差距 / 最快圈
     右上：当前速度
-    左下：油门—刹车指示条
-    中下：G-G 圆盘（一个点表示当前横向+纵向 G）
+    左下：纵向 G 指示条（向上绿 = 加速，向下红 = 刹车）
+    中下：G-G 圆盘（一个点表示当前横向+纵向 G）+ 横向 G 数值
     右下：本圈速度曲线 + 最快圈参考线 + 当前位置游标
+
+不做油门/刹车指示：GoPro 测不到油门开度，任何“油门/刹车”都只能是纵向 G
+的换算，而卡丁车漂移时纵向 G 里混着 -v·ω·sinβ 这一项（能到 ±0.8 g），
+与真实操作无关。详见左下那段注释。
 """
 
 from __future__ import annotations
@@ -49,13 +53,22 @@ _CYAN = (34, 211, 238, 255)
 _AMBER = (245, 158, 11, 255)
 _PANEL = (8, 12, 18, 150)
 
+# 【必须优先选含中日韩字形的字体】
+# HUD 里有“最快圈”“纵向 G”这类中文标签。Arial / Helvetica 这些纯拉丁字体
+# **不含 CJK 字形**，PIL 也不会自动回退，中文会被画成空白或豆腐块 ——
+# 实测同一串“最快圈”：Arial 只有 618 个墨点，Hiragino 有 3873。
+# 拉丁字母交给它们渲染也很干净，而大号数字走下面的等宽字体，不受影响。
 _FONT_CANDIDATES = [
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Supplemental/Songti.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+    # 退路：一个 CJK 字体都没有时，至少保证拉丁字母可读（中文会变方块）
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/Library/Fonts/Arial Bold.ttf",
     "/System/Library/Fonts/Helvetica.ttc",
     "/System/Library/Fonts/SFNS.ttf",
-    "/System/Library/Fonts/Supplemental/Verdana Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 _MONO_CANDIDATES = [
@@ -67,9 +80,19 @@ _MONO_CANDIDATES = [
 
 
 def _find_font(candidates: list[str]) -> str | None:
+    """返回第一个**真的能加载**的字体路径。
+
+    只判断文件存在还不够：损坏的文件或打不开的 ttc 会让 PIL 报错，
+    从而静默退化成内置位图字体（又小又丑）。先试加载一次再认定。
+    """
     for c in candidates:
-        if Path(c).exists():
-            return c
+        if not Path(c).exists():
+            continue
+        try:
+            ImageFont.truetype(c, 32)
+        except OSError:
+            continue
+        return c
     return None
 
 
@@ -210,6 +233,21 @@ def _fmt_time(v: float) -> str:
 
 
 # ==========================================================================
+def _g_limits(sa: ana.SessionAnalysis) -> tuple[float, float]:
+    """
+    整场（而不是当前 --overlay-range 片段）的横向 / 纵向 G 峰值。
+
+    用整场极值而不是片段极值，是为了让 HUD 的刻度在整个视频里保持一致 ——
+    否则换一个 --overlay-range，同一个 G 值会跳到圆盘的不同位置，没法对比。
+    """
+    tel = sa.lapset.telemetry
+    if tel is None or tel.a_long is None or tel.a_lat is None:
+        return 1.5, 1.0
+    lat = float(np.nanmax(np.abs(tel.a_lat)))
+    lon = float(np.nanmax(np.abs(tel.a_long)))
+    return max(1.0, lat), max(0.5, lon)
+
+
 def render_hud_frame(
     k: int,
     hud: dict[str, np.ndarray],
@@ -219,6 +257,8 @@ def render_hud_frame(
     fonts: _Fonts,
     *,
     show_trace: bool = True,
+    g_lat_max: float = 1.5,
+    g_long_max: float = 1.0,
 ) -> Image.Image:
     """画某一帧的 HUD，返回 RGBA 图。"""
     s = H / 1080.0  # 所有尺寸都按这个比例缩放，4K 和 720p 共用同一套布局
@@ -272,40 +312,46 @@ def render_hud_frame(
                font=fonts.get(px(34)), fill=_DIM, anchor="ra")
 
     # ------------------------------------------------------------------
-    # 左下：油门 / 刹车指示条（由纵向 G 换算）
+    # 左下：纵向 G 指示条
     # ------------------------------------------------------------------
-    bar_w, bar_gap = px(58), px(16)
-    bx, by = px(60), H - px(300)
-    bar_h = px(212)
-    d.text((bx, by - px(36)), "油门 / 刹车", font=fonts.get(px(24)), fill=_DIM)
+    # 【这里原本是“油门 / 刹车”，为什么会失真】
+    # GoPro 根本测不到油门和刹车开度。原先那两条 T/B 指示条是从纵向 G
+    # 硬换算出来的，而车体系纵向加速度里混着一项 -v·ω·sinβ（卡丁车漂移时
+    # 能到 ±0.8 g），与油门刹车毫无关系 —— 弯中明明在加油，读数却在乱跳。
+    # 换成直接显示纵向 G 本身：这是真实测到的量，不会骗人。
+    bar_w = px(60)
+    bar_h = px(260)
+    bx, by = px(60), H - px(360)
+    mid = by + bar_h / 2
+    half = bar_h / 2
+    d.text((bx, by - px(44)), "纵向 G", font=fonts.get(px(26)), fill=_DIM)
+    d.text((bx + px(300), by - px(44)),
+           f"{a_long:+.2f} g" if np.isfinite(a_long) else "-- g",
+           font=fonts.get(px(44), mono=True),
+           fill=(_GREEN if a_long >= 0 else _RED) if np.isfinite(a_long) else _DIM,
+           anchor="ra")
 
-    finite_long = hud["a_long"][np.isfinite(hud["a_long"])]
-    acc_max = max(0.15, float(np.max(finite_long)) if finite_long.size else 0.3)
-    brk_max = max(0.30, -float(np.min(finite_long)) if finite_long.size else 0.8)
-    thr_frac = float(np.clip(a_long / acc_max, 0.0, 1.0)) if np.isfinite(a_long) else 0.0
-    brk_frac = float(np.clip(-a_long / brk_max, 0.0, 1.0)) if np.isfinite(a_long) else 0.0
-
-    for i, (frac, col, label) in enumerate(((thr_frac, _GREEN, "T"), (brk_frac, _RED, "B"))):
-        x = bx + i * (bar_w + bar_gap)
-        d.rounded_rectangle([x, by, x + bar_w, by + bar_h], radius=px(10), fill=(255, 255, 255, 34))
-        if frac > 0.005:
-            filled = int(bar_h * frac)
-            d.rounded_rectangle([x, by + bar_h - filled, x + bar_w, by + bar_h],
-                                radius=px(10), fill=col)
-        d.text((x + bar_w / 2, by + bar_h + px(10)), label,
-               font=fonts.get(px(26), mono=True), fill=_DIM, anchor="ma")
+    d.rounded_rectangle([bx, by, bx + bar_w, by + bar_h], radius=px(10),
+                        fill=(255, 255, 255, 34))
+    d.line([bx - px(8), mid, bx + bar_w + px(8), mid],
+           fill=(255, 255, 255, 120), width=max(1, int(1.4 * s)))
+    if np.isfinite(a_long):
+        # 向上 = 加速（绿），向下 = 刹车（红），与圆盘纵轴方向一致
+        frac = float(np.clip(a_long / g_long_max, -1.0, 1.0))
+        hgt = abs(frac) * half
+        if hgt > 1.0:
+            top = mid - hgt if a_long >= 0 else mid
+            d.rounded_rectangle([bx, top, bx + bar_w, top + hgt],
+                                radius=px(10), fill=_GREEN if a_long >= 0 else _RED)
 
     # ------------------------------------------------------------------
     # 中下：G-G 圆盘（局部超采样，保证圆和点平滑）
     # ------------------------------------------------------------------
     r = px(96)
     cx, cy = px(430), H - px(196)
-    finite_lat = hud["a_lat"][np.isfinite(hud["a_lat"])]
-    g_max = 1.5
-    if finite_lat.size:
-        g_max = max(1.0, float(np.max(np.abs(finite_lat))))
-    if finite_long.size:
-        g_max = max(g_max, float(np.max(np.abs(finite_long))))
+    # 圆盘用两个方向的**共同**量程：摩擦圆的形状要求两轴等标尺，
+    # 这是它存在的意义（看得出“刹车 + 转向”的合力能不能吃满抓地力）。
+    g_max = max(g_lat_max, g_long_max)
     g_scale = r / (g_max * 1.15)
 
     dot_x = cx + (a_lat if np.isfinite(a_lat) else 0.0) * g_scale
@@ -333,10 +379,21 @@ def render_hud_frame(
     base.alpha_composite(_smooth_layer((gw, gh), _meter, ss=3), (gbox[0], gbox[1]))
 
     d = ImageDraw.Draw(base)
-    d.text((cx, cy + r + px(16)), "G", font=fonts.get(px(28), mono=True), fill=_DIM, anchor="ma")
-    d.text((cx, cy - r - px(46)),
-           f"{abs(a_lat):.2f} g" if np.isfinite(a_lat) else "-- g",
-           font=fonts.get(px(28), mono=True), fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ma")
+    d.text((cx, cy + r + px(16)), "G-G", font=fonts.get(px(26), mono=True), fill=_DIM, anchor="ma")
+    # 把横向数值明确写在圆盘上方 —— 只打一个数字很容易被误当成“总 G”，
+    # 而纵向那一半藏着不看就丢了（用户反馈的正是这个问题）。
+    # 「横向」用中文字体、数字用等宽字体分开画：等宽字体不含中文字形，
+    # 混在一串里会把中文变成豆腐块；而数字用等宽才能在跳动时不左右飘。
+    y_lab = cy - r - px(52)
+    lab_sans, lab_num = fonts.get(px(30)), fonts.get(px(30), mono=True)
+    txt_lat = "横向"
+    txt_num = f" {a_lat:+.2f} g" if np.isfinite(a_lat) else " -- g"
+    w_lat = d.textlength(txt_lat, font=lab_sans)
+    w_num = d.textlength(txt_num, font=lab_num)
+    x_lab = cx - (w_lat + w_num) / 2
+    d.text((x_lab, y_lab), txt_lat, font=lab_sans, fill=_DIM, anchor="ls")
+    d.text((x_lab + w_lat, y_lab), txt_num, font=lab_num,
+           fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ls")
 
     # ------------------------------------------------------------------
     # 右下：本圈速度曲线 + 最快圈参考 + 当前位置游标
@@ -415,6 +472,7 @@ def burn(
     hud = _hud_table(sa, fps, t0, t1)
     n_frames = hud["t"].size
     fonts = _Fonts()
+    g_lat_max, g_long_max = _g_limits(sa)
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -442,7 +500,8 @@ def burn(
     assert proc.stdin is not None
     try:
         for k in range(n_frames):
-            frame = render_hud_frame(k, hud, sa, W, H, fonts, show_trace=show_trace)
+            frame = render_hud_frame(k, hud, sa, W, H, fonts, show_trace=show_trace,
+                                     g_lat_max=g_lat_max, g_long_max=g_long_max)
             proc.stdin.write(frame.tobytes())
             if verbose and k % max(1, n_frames // 10) == 0:
                 pct = k / n_frames * 100
