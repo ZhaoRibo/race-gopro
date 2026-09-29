@@ -14,6 +14,11 @@ video/
 # macOS
 .DS_Store
 
+# VS Code：settings.json 里没有机器相关路径，保留共享（方便换机器后仍有同样的工作区配置）；
+# 但下面这几个常带本地绝对路径（解释器路径、本地调试 / 任务配置），一律不进仓库
+.vscode/launch.json
+.vscode/tasks.json
+
 # Python
 __pycache__/
 *.py[cod]
