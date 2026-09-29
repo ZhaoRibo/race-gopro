@@ -337,7 +337,23 @@ def attach_imu(
                 acc, t_imu, tel.speed, tel.t,
                 gps_x=tel.x, gps_y=tel.y, grav=grav, gyro=gyro,
             )
-            a_long, a_lat = imu.project(acc, t_imu, cal, cutoff_hz=7.0, in_g=True)
+            gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
+
+            # 有可用的 GPS 参考量就投影到**速度坐标系**（正解）；否则退回固定车身轴。
+            # 那条退路上纵向 G 基本等于噪声（见 velocity_frame_g 的说明），必须提醒。
+            if float(np.std(gl)) > 1e-3 and float(np.std(gt)) > 1e-3:
+                a_long, a_lat = imu.velocity_frame_g(acc, t_imu, cal, tel.t, gl, gt)
+                cal.projection = "velocity"
+            else:
+                a_long, a_lat = imu.project(acc, t_imu, cal, cutoff_hz=7.0, in_g=True)
+                cal.projection = "body"
+                cal.notes.append(
+                    "没有可用的 GPS 参考量，退回按固定车身轴投影；"
+                    "卡丁车漂移时侧滑角会污染纵向 G，此时纵向读数不可信。"
+                )
+            # 标定内部那几条"标定质量"提示是针对**固定车身轴**诊断的，
+            # 输出已经改用速度坐标系，留着会自相矛盾
+            cal.notes[:] = [n for n in cal.notes if not n.startswith("标定质量")]
 
         tel.t_imu = t_imu
         tel.acc = acc
@@ -346,33 +362,37 @@ def attach_imu(
         tel.cal = cal
         tel.a_long = a_long
         tel.a_lat = a_lat
-        warns.extend(cal.notes)
-
-        gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
         tel.a_long_gps = gl
         tel.a_lat_gps = gt
+        warns.extend(cal.notes)
 
-        # 交叉验证：两条独立路线算出的横向 G 应该一致。
-        # 横向参考 v·ω 标准差约 8 m/s²、信噪比好，是**判断标定对不对的首选指标**。
-        # 纵向 dv/dt 是对 10Hz 速度求导（噪声 0.77、信号 1.14，信噪比约 1.5），
-        # 而且卡丁车转弯时侧滑角很大，车体系纵向加速度本就不等于 dv/dt ——
-        # 低相关是物理现象而非故障，所以不做报警。
+        # 用**最终输出**重新算一致性指标，覆盖标定内部那套车身轴诊断值。
+        # 只在"真正在行驶"的样本上算：静止/极低速段的加速度基本是噪声底，
+        # 混进来会把相关性整体拉低，反映不出实际可用性。
         def _r(a: np.ndarray, b: np.ndarray) -> float:
             m = np.isfinite(a) & np.isfinite(b)
             if m.sum() < 100 or float(np.std(a[m])) < 1e-9 or float(np.std(b[m])) < 1e-9:
                 return float("nan")
             return float(np.corrcoef(a[m], b[m])[0, 1])
 
+        moving = geo.interp_to(tel.t, tel.speed, t_imu) > 3.0
         # 两边都先做 0.5 秒平滑再比，否则 GPS 求导噪声会把相关性压得极低
-        r_lat = _r(geo.savgol(t_imu, a_lat, 0.5, 2),
-                   geo.savgol(t_imu, geo.interp_to(tel.t, gt, t_imu), 0.5, 2))
-        if np.isfinite(r_lat) and abs(r_lat) < 0.6:
-            warns.append(
-                f"IMU 与 GPS 算出的横向 G 一致性偏低（r={r_lat:.2f}）："
-                "相机可能随头部晃动或支架松动，横向 G 的绝对值不可全信。"
-            )
-        # 纵向不再单独报警：卡丁车转弯时侧滑角很大，车体系纵向加速度本来就
-        # 不等于 GPS 的 dv/dt，低相关是物理现象而不是故障。
+        a_lat_s = geo.savgol(t_imu, a_lat, 0.5, 2)
+        a_lon_s = geo.savgol(t_imu, a_long, 0.5, 2)
+        gt_s = geo.savgol(t_imu, geo.interp_to(tel.t, gt, t_imu), 0.5, 2)
+        gl_s = geo.savgol(t_imu, geo.interp_to(tel.t, gl, t_imu), 0.5, 2)
+        r_lat = _r(a_lat_s[moving], gt_s[moving])
+        r_lon = _r(a_lon_s[moving], gl_s[moving])
+        cal.lateral_r = r_lat
+        cal.longitudinal_r = r_lon
+        cal.quality = float(np.nanmean([abs(r_lat), abs(r_lon)]))
+
+        for nm, r, hint in (
+            ("横向", r_lat, "相机可能随头部晃动，或支架松动"),
+            ("纵向", r_lon, "速度/轨迹数据可能不完整"),
+        ):
+            if np.isfinite(r) and abs(r) < 0.6:
+                warns.append(f"输出 G 与 GPS 参考的{nm}一致性偏低（r={r:.2f}）：{hint}。")
     else:
         gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
         tel.a_long_gps = gl

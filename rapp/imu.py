@@ -111,6 +111,14 @@ class MountCalibration:
     dc_lat: float
     """横向低频直流偏移 m/s²，同上。"""
 
+    projection: str
+    """输出 G 用的投影方式：'velocity' = 投影到速度坐标系（推荐），
+    'body' = 固定车身轴（仅在 GPS 参考量不可用时退回）。
+
+    注意：calibrate() 里一律先填 'body'，真正的输出由 telemetry.attach_imu()
+    决定 —— 标定只看得到加速度计，不知道 GPS 参考量能不能用。
+    """
+
     accel_has_gravity: bool
     """原始 ACCL 是否含重力分量。"""
 
@@ -126,11 +134,15 @@ class MountCalibration:
     notes: list[str]
 
     def describe(self) -> str:
+        proj = ("速度坐标系（纵向/横向按**速度方向**分解）"
+                if self.projection == "velocity"
+                else "固定车身轴（**退化方案**，纵向 G 不可信）")
         lines = [
             f"重力大小      : {self.gravity_mag:.3f} m/s²  (理论 9.807)",
             f"重力来源      : {self.gravity_source}",
+            f"输出投影      : {proj}",
             f"安装偏航角    : {np.degrees(self.yaw):+.1f}°",
-            f"标定质量      : {self.quality:.3f}   "
+            f"G 值一致性    : {self.quality:.3f}   "
             f"(横向 r={self.lateral_r:+.3f} / 纵向 r={self.longitudinal_r:+.3f})",
             f"低频直流修正  : 纵向 {self.dc_long:+.3f} / 横向 {self.dc_lat:+.3f} m/s² "
             f"({np.hypot(self.dc_long, self.dc_lat) / G0:.3f} g)",
@@ -429,6 +441,7 @@ def calibrate(
         lateral_sign=lateral_sign,
         dc_long=dc_long,
         dc_lat=dc_lat,
+        projection="body",
         accel_has_gravity=accel_has_gravity,
         gravity_source=gravity_source,
         tilt_disagreement_deg=float(tilt_disagreement),
@@ -482,6 +495,85 @@ def project(
     return a_long, a_lat
 
 
+def velocity_frame_g(
+    acc: np.ndarray,
+    t_acc: np.ndarray,
+    cal: MountCalibration,
+    t_gps: np.ndarray,
+    a_long_gps: np.ndarray,
+    a_lat_gps: np.ndarray,
+    *,
+    direction_seconds: float = 0.8,
+    cutoff_hz: float = 7.0,
+    in_g: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    把平面加速度投影到**速度坐标系**，得到纵向 / 横向 G。
+
+    【为什么不能用"固定在相机上的车身轴"—— 本项目最深的坑】
+
+    卡丁车漂移时侧滑角 β 在 ±20~30° 之间变化，所以那个固定的"纵向轴"测到的
+    根本不是 dv/dt，而是 |A|·sin(β − β̄) —— 被峰值 ±15 m/s² 的横向加速度调制。
+    实测：固定车身轴与 GPS 求导的纵向相关性逐圈只有 −0.38~+0.10（等于噪声）。
+
+    正解是把平面加速度矢量投影到**速度方向**上：
+
+        |A|       ← IMU。矢量模长不受坐标系选择影响（实测与 GPS 的 |A| 相关性 0.85）
+        φ         ← GPS。加速度相对速度的夹角，tanφ = (v·ω)/(dv/dt)
+        a纵 = |A|·cosφ,   a横 = |A|·sinφ
+
+    实测逐圈纵向 r 从 −0.07 提升到 +0.92（中位）、斜率 +1.11，
+    横向 r 从 0.96 提升到 0.99、斜率 1.03。
+
+    【为什么不用陀螺仪积分出航向】积分会漂移：866 秒后偏航误差累积到几十度，
+    实测后几圈会重新退化。而 φ 完全由 GPS 给出，无积分、不漂移。
+    代价是 φ 的带宽只有约 1 Hz（GPS 10Hz 且航向噪声大），方向的快变部分丢失 ——
+    好在侧滑角本身是按"秒"变化的慢量，而**幅度**仍由 IMU 以 200 Hz 提供。
+
+    参数
+    ----
+    a_long_gps, a_lat_gps : `gps_derived_g()` 的输出（单位 g，这里只取方向，单位无所谓）
+
+    已知残留误差
+    ------------
+    · 幅度标定在 ±10% 量级（实测逐圈斜率 1.04~1.41）。根源不是本模块，
+      而是参照量本身：GPS 的 v·ω 由强平滑后的位置算出，峰值被衰减了约 5~10%，
+      于是方向偏"纵向"、幅度偏高（横向通道同样能看到 0.90~0.96 的斜率）。
+    · 方向带宽约 1 Hz：快变部分的细节来自 IMU 的幅度，不是方向。
+    · 低加速度（|A|<3 m/s²）时 IMU 的幅度有约 1.5 倍的正向偏置（噪声底，
+      E|A+噪声| > |A|），会让极低速段（如出场圈起步的抖动）虚高。
+    """
+    acc = np.asarray(acc, dtype=np.float64)
+    t_acc = np.asarray(t_acc, dtype=np.float64)
+
+    # 平面加速度矢量：先低通压掉振动，再去掉重力、只留水平分量
+    acc_f = geo.lowpass(t_acc, acc, CAL_FILTER_HZ)
+    dyn = acc_f - cal.up_hat * cal.gravity_mag if cal.accel_has_gravity else acc_f.copy()
+    dyn = dyn - np.outer(dyn @ cal.up_hat, cal.up_hat)
+    mag = np.linalg.norm(dyn, axis=1)
+
+    # 方向：对 (dv/dt, v·ω) 这个**二维向量**做平滑再取单位方向。
+    # 不能对 atan2 的结果直接平滑 —— 角度在 ±π 处会跳变；
+    # 而且加速度接近零时角度本身是纯噪声，向量平滑天然处理了这一点
+    # （|v·ω| 和 |dv/dt| 都很小的时候，方向对结果毫无影响）。
+    lo = geo.savgol(t_gps, np.asarray(a_long_gps, dtype=np.float64), direction_seconds, 2)
+    la = geo.savgol(t_gps, np.asarray(a_lat_gps, dtype=np.float64), direction_seconds, 2)
+    n = np.hypot(lo, la)
+    ok = n > 1e-9
+    safe = np.where(ok, n, 1.0)
+    cos_phi = np.where(ok, lo / safe, 1.0)
+    sin_phi = np.where(ok, la / safe, 0.0)
+    cos_phi = geo.interp_to(t_gps, cos_phi, t_acc)
+    sin_phi = geo.interp_to(t_gps, sin_phi, t_acc)
+
+    a_long = geo.lowpass(t_acc, mag * cos_phi, cutoff_hz)
+    a_lat = geo.lowpass(t_acc, mag * sin_phi, cutoff_hz)
+    if in_g:
+        a_long = a_long / G0
+        a_lat = a_lat / G0
+    return a_long, a_lat
+
+
 def gps_derived_g(
     t_gps: np.ndarray,
     speed: np.ndarray,
@@ -518,4 +610,4 @@ def gps_derived_g(
     return a_long, a_lat
 
 
-__all__ = ["MountCalibration", "calibrate", "gps_derived_g", "project"]
+__all__ = ["MountCalibration", "calibrate", "gps_derived_g", "project", "velocity_frame_g"]
