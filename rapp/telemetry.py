@@ -171,13 +171,24 @@ class Telemetry:
         span = float(self.t[-1] - self.t[0])
         return (self.t.size - 1) / span if span > 0 else 0.0
 
-    def imu_g(self, t_axis: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """把 200Hz 的 G 值插值到任意时间轴（通常是 GPS 时间轴或距离网格）。"""
+    def imu_g(
+        self, t_axis: np.ndarray, *, smooth_seconds: float = 0.0
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """把 200Hz 的 G 值插值到任意时间轴（通常是 GPS 时间轴或距离网格）。
+
+        smooth_seconds > 0 时**先按时间平滑再插值**。算"峰值"这类极值指标
+        必须这么做，否则拿到的是短尖峰而不是驾驶动作 —— 理由见
+        `imu.PEAK_SMOOTH_S`。
+        """
         if self.a_long is None or self.t_imu is None:
-            raise RuntimeError("标定未完成，没有可用的 G 值")
+            raise RuntimeError("G 值提取未完成，没有可用的 G 值")
+        a_long, a_lat = self.a_long, self.a_lat
+        if smooth_seconds > 0.0:
+            a_long = imu.peak_g(a_long, self.t_imu, smooth_seconds)
+            a_lat = imu.peak_g(a_lat, self.t_imu, smooth_seconds)
         return (
-            geo.interp_to(self.t_imu, self.a_long, t_axis),
-            geo.interp_to(self.t_imu, self.a_lat, t_axis),
+            geo.interp_to(self.t_imu, a_long, t_axis),
+            geo.interp_to(self.t_imu, a_lat, t_axis),
         )
 
     def speed_stats(self) -> dict[str, float]:

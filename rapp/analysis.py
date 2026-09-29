@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import laps
+from . import imu, laps
 from .geo import G0
 
 BRAKE_THRESHOLD_G = -0.12
@@ -190,9 +190,10 @@ class SessionAnalysis:
                     "length_m": round(l.length, 1),
                     "max_speed_kmh": round(l.max_speed * 3.6, 1),
                     "min_speed_kmh": round(l.min_speed * 3.6, 1),
-                    "max_lat_g": round(l.max_lat_g, 2),
-                    "max_brake_g": round(l.max_brake_g, 2),
-                    "max_accel_g": round(l.max_accel_g, 2),
+                    "peak_lat_g": round(l.peak_lat_g, 2),
+                    "peak_brake_g": round(l.peak_brake_g, 2),
+                    "peak_accel_g": round(l.peak_accel_g, 2),
+                    "speed_gain_ms": round(l.speed_gain_ms, 1),
                     "accel_time_pct": round(l.accel_time_pct, 1),
                 }
                 for l in ls.laps
@@ -325,7 +326,20 @@ def detect_corners(
 
     corners: list[Corner] = []
     speeds = [l.speed for l in lapset.laps]
-    latgs = [l.a_lat for l in lapset.laps]
+    # 弯道的"最大横 G"也要用**按时间平滑 1 秒**后的曲线 —— 否则一个振动尖峰
+    # 就能把某个弯的峰值抬到 2 g，让它看起来比别的弯更极限。
+    # 平滑必须按时间做：距离网格上同样 1 米的窗口，在 20 km/h 和 90 km/h 处
+    # 对应的时间差 4 倍以上，平滑力度根本不一致。
+    tel = lapset.telemetry
+    if tel is not None:
+        latgs = [
+            tel.imu_g(l.t_start + l.time, smooth_seconds=imu.PEAK_SMOOTH_S)[1]
+            if l.time is not None
+            else l.a_lat
+            for l in lapset.laps
+        ]
+    else:
+        latgs = [l.a_lat for l in lapset.laps]
     n = len(lapset.laps)
     valid_mask = np.array([l.valid for l in lapset.laps], dtype=bool)
 

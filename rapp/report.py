@@ -89,7 +89,12 @@ def print_lap_table(ls: laps.LapSet, rolling_best: float = float("nan")) -> None
 
     best = ls.best_lap
     best_sectors = ls.best_sectors
-    headers = ["圈号", "圈时", "Δ最快", "极速", "最慢", "最大横G", "最大刹车G", "加速时间占比"]
+    # 列名里的"峰值"是实打实的：这几个数都按时间平滑过 1 秒（见 imu.PEAK_SMOOTH_S），
+    # 不是裸信号的单点极值。
+    # 「速度增量」= 一圈内所有正 Δv 之和，是唯一有精确物理答案的驾驶强度指标，
+    # 比 G 峰值可靠，也比 G 峰值更能看出马力差异。
+    headers = ["圈号", "圈时", "Δ最快", "极速", "峰值横G", "峰值刹G", "峰值加速",
+               "速度增量", "加速占比"]
     headers = headers[: 2] + [f"分段{i + 1}" for i in range(ls.sector_count)] + headers[2:]
 
     rows: list[list[str]] = []
@@ -110,9 +115,10 @@ def print_lap_table(ls: laps.LapSet, rolling_best: float = float("nan")) -> None
                 "—" if lap is best else laps.format_delta(delta),
                 *sector_cells,
                 f"{lap.max_speed * 3.6:.1f}",
-                f"{lap.min_speed * 3.6:.1f}",
-                f"{lap.max_lat_g:.2f}",
-                f"{lap.max_brake_g:.2f}",
+                f"{lap.peak_lat_g:.2f}",
+                f"{lap.peak_brake_g:.2f}",
+                f"{lap.peak_accel_g:.2f}",
+                f"{lap.speed_gain_ms:.0f}",
                 f"{lap.accel_time_pct:.0f}%",
             ]
         )
@@ -207,8 +213,8 @@ def print_report(sa: ana.SessionAnalysis) -> None:
     if t is not None:
         print(t.summary())
         print(f"有效圈数      : {len(ls.laps)}")
-        max_lat = max((l.max_lat_g for l in ls.laps), default=0.0)
-        max_brk = max((l.max_brake_g for l in ls.laps), default=0.0)
+        max_lat = max((l.peak_lat_g for l in ls.laps), default=0.0)
+        max_brk = max((l.peak_brake_g for l in ls.laps), default=0.0)
         print(f"全场最大横向G : {max_lat:.2f} g")
         print(f"全场最大刹车G : {max_brk:.2f} g")
 
@@ -285,7 +291,8 @@ def export_csv(sa: ana.SessionAnalysis, outdir: str | Path) -> list[Path]:
             ["lap", "time_s", "delta_to_best_s"]
             + [f"sector{i + 1}_s" for i in range(ls.sector_count)]
             + ["length_m", "max_speed_kmh", "min_speed_kmh", "avg_speed_kmh",
-               "max_lat_g", "max_brake_g", "max_accel_g", "accel_time_pct"]
+               "peak_lat_g", "peak_brake_g", "peak_accel_g", "speed_gain_ms",
+               "accel_time_pct"]
         )
         for lap in ls.laps:
             w.writerow([
@@ -294,7 +301,8 @@ def export_csv(sa: ana.SessionAnalysis, outdir: str | Path) -> list[Path]:
                 *[f"{s:.3f}" for s in lap.sectors],
                 f"{lap.length:.1f}", f"{lap.max_speed * 3.6:.1f}", f"{lap.min_speed * 3.6:.1f}",
                 f"{float(np.mean(lap.speed)) * 3.6:.1f}",
-                f"{lap.max_lat_g:.3f}", f"{lap.max_brake_g:.3f}", f"{lap.max_accel_g:.3f}",
+                f"{lap.peak_lat_g:.3f}", f"{lap.peak_brake_g:.3f}", f"{lap.peak_accel_g:.3f}",
+                f"{lap.speed_gain_ms:.2f}",
                 f"{lap.accel_time_pct:.1f}",
             ])
     written.append(p)

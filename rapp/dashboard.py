@@ -415,7 +415,7 @@ function speedColor(s, lo, hi) {
 
   // ---- 逐圈明细表 ----
   const lHead = ["圈号","圈时","Δ最快"].concat(DATA.sector_labels)
-    .concat(["里程","极速","最慢","平均速","最大横G","最大刹车G","加速时间占比"]);
+    .concat(["里程","极速","最慢","平均速","峰值横G","峰值刹G","峰值加速","速度增量","加速占比"]);
   let h2 = "<thead><tr>" + lHead.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
   for (const l of DATA.laps) {
     const delta = l.duration_s - BEST.duration_s;
@@ -429,7 +429,8 @@ function speedColor(s, lo, hi) {
     l.sectors_s.forEach(s => row += td(s.toFixed(3), cls));
     row += td(l.length_m.toFixed(0), cls) + td(l.max_speed_kmh.toFixed(1), cls);
     row += td(l.min_speed_kmh.toFixed(1), cls) + td(l.avg_speed_kmh.toFixed(1), cls);
-    row += td(l.max_lat_g.toFixed(2), cls) + td(l.max_brake_g.toFixed(2), cls);
+    row += td(l.peak_lat_g.toFixed(2), cls) + td(l.peak_brake_g.toFixed(2), cls);
+    row += td(l.peak_accel_g.toFixed(2), cls) + td(l.speed_gain_ms.toFixed(0), cls);
     row += td(l.accel_time_pct.toFixed(0) + "%", cls);
     h2 += row + "</tr>";
   }
@@ -505,8 +506,8 @@ def _cards(sa: ana.SessionAnalysis) -> str:
     ls = sa.lapset
     t = ls.telemetry
     best = ls.best_lap
-    max_lat = max((l.max_lat_g for l in ls.laps), default=0.0)
-    max_brk = max((l.max_brake_g for l in ls.laps), default=0.0)
+    max_lat = max((l.peak_lat_g for l in ls.laps), default=0.0)
+    max_brk = max((l.peak_brake_g for l in ls.laps), default=0.0)
     max_spd = max((l.max_speed for l in ls.laps), default=0.0)
 
     items = [
@@ -607,8 +608,10 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
             "max_speed_kmh": round(lap.max_speed * 3.6, 1),
             "min_speed_kmh": round(lap.min_speed * 3.6, 1),
             "avg_speed_kmh": round(float(np.mean(lap.speed)) * 3.6, 1),
-            "max_lat_g": round(lap.max_lat_g, 2),
-            "max_brake_g": round(lap.max_brake_g, 2),
+            "peak_lat_g": round(lap.peak_lat_g, 2),
+            "peak_brake_g": round(lap.peak_brake_g, 2),
+            "peak_accel_g": round(lap.peak_accel_g, 2),
+            "speed_gain_ms": round(lap.speed_gain_ms, 1),
             "accel_time_pct": round(lap.accel_time_pct, 1),
             "speed_kmh": [round(float(v), 2) for v in lap.speed[gi] * 3.6],
             "delta_s": [round(float(v), 3) for v in dl[gi]],

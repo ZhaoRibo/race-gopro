@@ -41,7 +41,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from . import analysis as ana
-from . import laps
+from . import imu, laps
 
 # 配色
 _WHITE = (240, 245, 250, 255)
@@ -235,16 +235,22 @@ def _fmt_time(v: float) -> str:
 # ==========================================================================
 def _g_limits(sa: ana.SessionAnalysis) -> tuple[float, float]:
     """
-    整场（而不是当前 --overlay-range 片段）的横向 / 纵向 G 峰值。
+    整场（而不是当前 --overlay-range 片段）的横向 / 纵向 G 刻度。
 
     用整场极值而不是片段极值，是为了让 HUD 的刻度在整个视频里保持一致 ——
     否则换一个 --overlay-range，同一个 G 值会跳到圆盘的不同位置，没法对比。
+
+    极值本身取**按时间平滑 1 秒**后的信号（见 `imu.PEAK_SMOOTH_S`）：裸信号的单点
+    极值会被怠速振动之类的尖峰撑大，把整个圆盘的刻度压扁 —— 刻度一压扁，正常
+    驾驶动作在盘上都只占中心一小块，反而看不出差别。
+    这样定刻度之后，偶发的瞬时尖峰会超出量程，圆盘会把点**钉在圆周上**（见
+    `render_hud_frame`），旁边的数字读数仍然是真实瞬时值。
     """
     tel = sa.lapset.telemetry
-    if tel is None or tel.a_long is None or tel.a_lat is None:
+    if tel is None or tel.a_long is None or tel.a_lat is None or tel.t_imu is None:
         return 1.5, 1.0
-    lat = float(np.nanmax(np.abs(tel.a_lat)))
-    lon = float(np.nanmax(np.abs(tel.a_long)))
+    lat = float(np.nanmax(np.abs(imu.peak_g(tel.a_lat, tel.t_imu))))
+    lon = float(np.nanmax(np.abs(imu.peak_g(tel.a_long, tel.t_imu))))
     return max(1.0, lat), max(0.5, lon)
 
 
@@ -356,6 +362,13 @@ def render_hud_frame(
 
     dot_x = cx + (a_lat if np.isfinite(a_lat) else 0.0) * g_scale
     dot_y = cy - (a_long if np.isfinite(a_long) else 0.0) * g_scale
+
+    # 刻度是按"平滑 1 秒的整场峰值"定的（见 _g_limits），所以偶发的瞬时尖峰
+    # （振动、路面冲击）会超出量程。把点**钉在圆周上**，而不是让它飞到画面外面去。
+    _dx, _dy = dot_x - cx, dot_y - cy
+    _rr = float(np.hypot(_dx, _dy))
+    if _rr > r > 0:
+        dot_x, dot_y = cx + _dx / _rr * r, cy + _dy / _rr * r
 
     pad = px(8)
     gbox = (cx - r - pad, cy - r - pad, cx + r + pad, cy + r + pad)

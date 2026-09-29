@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import geo, telemetry
+from . import geo, imu, telemetry
 
 MIN_LAP_SECONDS = 8.0
 """比这更短的一定是误判（卡丁车最快圈也在 20 s 以上）。"""
@@ -132,15 +132,34 @@ class Lap:
     # ---- 统计量 ----
     max_speed: float = 0.0
     min_speed: float = 0.0
-    max_lat_g: float = 0.0
-    max_brake_g: float = 0.0
-    max_accel_g: float = 0.0
+
+    peak_lat_g: float = 0.0
+    peak_brake_g: float = 0.0
+    peak_accel_g: float = 0.0
+    """本圈的横 / 刹车 / 加速峰值 G。
+
+    三者都是**按时间 1 秒平滑后**再取极值的（见 `imu.PEAK_SMOOTH_S`）。
+    不要拿裸信号的单点极值来比车 —— 实测怠速振动能造出 +1.18 g 的假"加速"。
+    """
+
+    speed_gain_ms: float = 0.0
+    """本圈的速度总增量（所有正 Δv 之和），m/s。
+
+    这是**唯一一个有精确物理答案**的驾驶强度指标：一圈之内，
+    纵向加速度的正向积分必须等于速度总增量
+
+        ∫max(a纵, 0) dt  ==  speed_gain_ms / 9.807   (g·s)
+
+    所以它既能横向比车（马力差别一眼看出来），又能反过来校验 G 值幅度对不对。
+    """
+
     accel_time_pct: float = 0.0
     """本圈“纵向 G 为正”的时间占比。
 
     【别当成全油门】GoPro 测不到油门开度。而且卡丁车漂移时车体系纵向加速度里
     混着一项 -v·ω·sinβ（能到 ±0.8 g），所以这个数主要反映“加速过程占了多久”，
     与油门开度没有对应关系。原先叫 full_throttle_pct 是个误导。
+    注意它是**按时间**算的，而峰值类指标平滑过 —— 两者不要混用。
     """
 
     valid: bool = True
@@ -651,9 +670,24 @@ def _build_grid(tel: telemetry.Telemetry, gate: Gate, crossing_times: np.ndarray
 
         lap.max_speed = float(np.max(lap.speed))
         lap.min_speed = float(np.min(lap.speed))
-        lap.max_lat_g = float(np.max(np.abs(lap.a_lat)))
-        lap.max_brake_g = float(abs(np.min(lap.a_long)))
-        lap.max_accel_g = float(np.max(lap.a_long))
+
+        # 峰值 G 一律用**按时间平滑 1 秒**后的信号取极值。
+        # 裸信号的单点极值被短尖峰主导（实测怠速振动能造出 +1.18 g 的"加速"），
+        # 不同圈/不同车之间完全没法比。理由见 imu.PEAK_SMOOTH_S。
+        al_pk, at_pk = tel.imu_g(t_of_s, smooth_seconds=imu.PEAK_SMOOTH_S)
+        lap.peak_lat_g = float(np.max(np.abs(at_pk)))
+        lap.peak_brake_g = float(abs(np.min(al_pk)))
+        lap.peak_accel_g = float(np.max(al_pk))
+
+        # 一整圈的速度总增量：所有正 Δv 之和。
+        # 它与纵向 G 之间是物理恒等式（∫max(a纵,0)dt == Δv），
+        # 所以既能横向比车，也能反过来校验 G 值的幅度。
+        # 用原始 10Hz 速度直接差分 —— 这里是"总量"不是"峰值"，不需要平滑，
+        # 平滑反而会把小的速度起伏抹掉、让总量偏小。
+        seg = (t >= t[i0]) & (t <= t[i1])
+        dv = np.diff(tel.speed[seg])
+        lap.speed_gain_ms = float(dv[dv > 0.0].sum())
+
         # 只统计“纵向 G 为正”的时间占比。不要叫它全油门 —— GoPro 测不到
         # 油门开度，而且纵向 G 里还混着侧滑项 -v·ω·sinβ，与油门无对应关系。
         lap.accel_time_pct = float(np.mean(lap.a_long > 0.0) * 100.0)

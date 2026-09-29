@@ -70,6 +70,32 @@ CAL_FILTER_HZ = 4.0
 4Hz 保留了刹车/转向动作（0~5Hz），足以覆盖卡丁车的驾驶动态。
 """
 
+PEAK_SMOOTH_S = 1.0
+"""算「峰值 G」这类极值指标时的时间平滑窗口，秒。
+
+**为什么必须平滑**：单点极值被短尖峰主导，根本没法横向比车、比圈。实测有辆二冲程
+卡丁车全场最大的"纵向加速"是 **+1.18 g**，出现在**车速 0.0 km/h** 的时候 ——
+那是发动机怠速把车抖出来的，属于 $E|A+噪声| > |A|$ 的噪声底效应，和驾驶动作无关。
+按原始单点取值，这台车看起来比四冲程还猛；平滑 1 秒后就变成 0.58 g，才是真相。
+
+**为什么是 1 秒**：既要压掉尖峰，又不能把真实峰值抹掉。卡丁车最短的加速/刹车段
+也有 2~3 秒，1 秒窗口够短。
+
+用峰值指标时**一律走这条路**（`peak_g()`），不要拿裸信号直接 `np.max`。
+"""
+
+
+def peak_g(
+    a: np.ndarray, t: np.ndarray, smooth_seconds: float = PEAK_SMOOTH_S
+) -> np.ndarray:
+    """
+    按**时间**平滑后的 G 值，用来算"峰值"这类极值指标。
+
+    注意是按时间平滑，不是按距离 —— 距离网格上同样 1 米的窗口，在 20 km/h 和
+    90 km/h 处对应的时间差 4 倍以上，平滑力度完全不一致。
+    """
+    return geo.savgol(t, np.asarray(a, dtype=np.float64), smooth_seconds, 2)
+
 
 def _signed_permutations() -> tuple[np.ndarray, ...]:
     """全部 48 个「带符号的置换矩阵」（3 个轴的 6 种排法 × 每种轴 2 个符号）。
@@ -387,9 +413,11 @@ def gps_derived_g(
 
 
 __all__ = [
+    "PEAK_SMOOTH_S",
     "GField",
     "GravityEstimate",
     "gps_derived_g",
     "gravity_from_grav",
+    "peak_g",
     "velocity_frame_g",
 ]
