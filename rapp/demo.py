@@ -12,8 +12,8 @@
        并按 GoPro 的坐标约定（x 右 / y 下 / z 前）输出 ACCL 流
     5. 给 GPS 加上 1.5 m 量级的定位噪声和 18Hz 的采样率
 
-它的第二个用途是**自检**：因为生成时安装角是已知的，所以可以反过来验证
-`imu.calibrate()` 有没有把安装角标定对、G 值算得准不准。
+它的第二个用途是**自检**：因为生成时加速度、重力方向都是已知的，所以可以反过来
+验证轴识别、重力扣除与 G 值投影对不对（见 `selftest()`）。
 """
 
 from __future__ import annotations
@@ -276,7 +276,9 @@ def make(
     omega += rng.normal(0.0, 0.01, omega.shape)
 
     # ---- GRAV：相机坐标系下的重力方向 ----
-    g_veh = np.tile(np.array([0.0, -G0, 0.0]), (v_imu.size, 1))
+    # 注意符号约定：真实 GoPro 的 GRAV 静止时与 ACCL **同向**（都指向"上"，
+    # 即 +1g 的位置），而不是指向地心。实测已验证（静止时两者夹角 0.3°）。
+    g_veh = np.tile(np.array([0.0, G0, 0.0]), (v_imu.size, 1))
     g_cam = (g_veh @ _GOPRO_TO_VEHICLE.T) @ M_mount.T
     # 真实相机的 GRAV 不是理想的：姿态融合有零点几度的残余漂移，幅值也有抖动。
     # 加上这些才不至于把自检变成一道送分题。
@@ -330,7 +332,7 @@ def make(
     )
     tel.warnings.clear()
 
-    telemetry.attach_imu(tel, t_imu, f_cam, gyro=omega, grav=g_cam, t_grav=t_imu)
+    telemetry.attach_imu(tel, t_imu, f_cam, grav=g_cam, t_grav=t_imu)
 
     truth = {
         "mount_pitch_deg": mount_pitch,
@@ -344,8 +346,9 @@ def make(
 
     if verbose:
         print(tel.summary())
-        if tel.cal:
-            print(tel.cal.describe())
+        if tel.gfield:
+            print("\n— G 值提取 —")
+            print(tel.gfield.describe())
 
     return DemoSession(telemetry=tel, truth=truth)
 
@@ -371,27 +374,34 @@ def selftest(seed: int = 7, n_laps: int = 6) -> tuple[bool, list[str]]:
     lines.append(f"  赛道周长      : {truth['track_length']:.1f} m")
     lines.append(f"  合成时长      : {tel.duration:.1f} s")
 
-    if tel.cal is None:
-        lines.append("  ✗ 标定失败：没有生成安装角标定结果")
+    if tel.gfield is None:
+        lines.append("  ✗ G 值提取失败：没有生成重力解算结果")
         return False, lines
 
-    cal = tel.cal
+    gf = tel.gfield
     lines.append(f"  真值安装角    : pitch {truth['mount_pitch_deg']:+.1f}° / "
                  f"roll {truth['mount_roll_deg']:+.1f}° / yaw {truth['mount_yaw_deg']:+.1f}°")
-    lines.append(f"  重力方向来源  : {cal.gravity_source}")
-    lines.append(f"  标定出的重力  : {cal.gravity_mag:.3f} m/s²  (真值 9.807)")
-    if np.isfinite(cal.tilt_disagreement_deg):
-        lines.append(f"  两种重力估计夹角: {cal.tilt_disagreement_deg:.1f}°  "
-                     "（本合成赛道以左弯为主，正是这条差异说明了为什么要用 GRAV）")
+    lines.append(f"  重力来源      : {gf.gravity_source}")
+    lines.append(f"  解出的重力    : {gf.gravity_mag:.3f} m/s²  (真值 9.807)")
+    lines.append(f"  重力轴变换    : {gf.gravity.describe_axis()}")
 
-    g_err = abs(cal.gravity_mag - G0)
+    # 合成数据里 GRAV 与 ACCL 本来就同轴系，所以解出来必须是恒等变换。
+    # 这一条能直接抓出轴识别逻辑被改坏。
+    if np.allclose(gf.gravity.axis_map, np.eye(3), atol=1e-6):
+        lines.append("  ✓ 轴变换识别为恒等（合成数据 GRAV/ACCL 同轴系，符合预期）")
+    else:
+        ok = False
+        lines.append("  ✗ 轴变换识别错误，本应为恒等：")
+        lines.append("    " + np.array2string(gf.gravity.axis_map, precision=0).replace("\n", "\n    "))
+
+    g_err = abs(gf.gravity_mag - G0)
     if g_err > 0.35:
         ok = False
         lines.append(f"  ✗ 重力估计偏差 {g_err:.3f} m/s²，超出容差")
     else:
         lines.append(f"  ✓ 重力估计偏差 {g_err:.3f} m/s²，在容差内")
 
-    # 纵向 G：把标定结果和真值比较
+    # 纵向 G：把提取结果和真值比较
     a_long_true = truth["a_long_true"]
     r_long = float(np.corrcoef(tel.a_long, a_long_true)[0, 1])
     lines.append(f"  纵向 G 相关性 : r = {r_long:.4f}")
@@ -407,7 +417,7 @@ def selftest(seed: int = 7, n_laps: int = 6) -> tuple[bool, list[str]]:
     lines.append(f"  横向 G 相关性 : r = {r_lat:+.4f}  (正号表示符号约定正确)")
     if r_lat < 0.85:
         ok = False
-        lines.append("  ✗ 横向 G 与真值不一致（可能是符号反了或标定失败）")
+        lines.append("  ✗ 横向 G 与真值不一致（可能是符号反了或方向估计失败）")
     else:
         lines.append("  ✓ 横向 G 与真值一致，符号约定正确（正 = 左转）")
 

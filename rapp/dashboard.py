@@ -520,8 +520,8 @@ def _cards(sa: ana.SessionAnalysis) -> str:
         ("最大横向G", f"{max_lat:.2f}", "g", ""),
         ("最大刹车G", f"{max_brk:.2f}", "g", ""),
     ]
-    if t is not None and t.cal is not None:
-        items.append(("标定质量", f"{t.cal.quality:.2f}", "G 值可信度 (0~1)", "accent"))
+    if t is not None and t.gfield is not None:
+        items.append(("G 值可信度", f"{t.gfield.quality:.2f}", "与 GPS 参考的一致性 (0~1)", "accent"))
 
     out = []
     for k, v, sub, cls in items:

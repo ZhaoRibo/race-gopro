@@ -79,8 +79,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-trace", action="store_true", help="HUD 里不画速度曲线小图")
 
     p.add_argument("--list-streams", action="store_true", help="只列出视频里的遥测流，不做分析")
-    p.add_argument("--g-source", choices=("grav", "calib"), default="grav",
-                   help="重力从哪来：grav=用 GRAV 流逐时刻扣（默认）；calib=老的三步标定")
     p.add_argument("--selftest", action="store_true", help="用合成数据自检整条流水线")
     p.add_argument("-q", "--quiet", action="store_true", help="少打印一些中间信息")
 
@@ -126,7 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         print()
         print("─" * 60)
         print(f"  GPMF 二进制解析器 : {'通过 ✓' if ok_parser else '未通过 ✗'}")
-        print(f"  IMU 标定与 G 值   : {'通过 ✓' if ok_demo else '未通过 ✗'}")
+        print(f"  G 值提取          : {'通过 ✓' if ok_demo else '未通过 ✗'}")
         print("─" * 60)
         return 0 if (ok_parser and ok_demo) else 1
 
@@ -152,9 +150,9 @@ def main(argv: list[str] | None = None) -> int:
         source_name = "demo"
         video_path: Path | None = None
         print(tel.summary())
-        if tel.cal:
-            print("\n— 加速度计标定 —")
-            print(tel.cal.describe())
+        if tel.gfield:
+            print("\n— G 值提取 —")
+            print(tel.gfield.describe())
     else:
         if not args.video:
             print("请提供 GoPro 视频文件，或加 --demo 用合成数据体验。", file=sys.stderr)
@@ -172,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         if not video_path.exists():
             print(f"找不到文件：{video_path}", file=sys.stderr)
             return 2
-        tel = telemetry.load(video_path, verbose=verbose, g_source=args.g_source)
+        tel = telemetry.load(video_path, verbose=verbose)
         source_name = video_path.stem
 
     # ------------------------------------------------------------------

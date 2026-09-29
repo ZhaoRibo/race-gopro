@@ -11,8 +11,8 @@
                        万一 SCAL 方向搞反了，用数值范围自动识别
     3. 投影            经纬度 → 本地平面米制坐标
     4. 清洗            去 GPS 尖峰、剔除无效定位点
-    5. 标定            imu.calibrate() 求安装角
-    6. 派生量          标定后的纵向/横向 G（200Hz）+ GPS 推算的 G（交叉验证）
+    5. G 值提取        用 GRAV 扣重力 + 投影到速度坐标系（见 imu.py）
+    6. 交叉验证        用 GPS 独立推算 G，与 IMU 的对比
 """
 
 from __future__ import annotations
@@ -137,8 +137,10 @@ class Telemetry:
     gyro: np.ndarray | None = None
     grav: np.ndarray | None = None
 
-    # ---- 标定与派生量 ----
-    cal: imu.MountCalibration | None = None
+    # ---- G 值提取结果 ----
+    gfield: imu.GField | None = None
+    """重力矢量（逐时刻）+ 轴变换 + 质量指标，见 `imu.GField`。"""
+
     a_long: np.ndarray | None = None
     """纵向 G，200Hz。正值 = 加速，负值 = 刹车。"""
 
@@ -319,21 +321,15 @@ def attach_imu(
     tel: Telemetry,
     t_imu: np.ndarray | None,
     acc: np.ndarray | None,
-    gyro: np.ndarray | None = None,
     grav: np.ndarray | None = None,
     t_grav: np.ndarray | None = None,
-    *,
-    g_source: str = "grav",
 ) -> Telemetry:
     """
     把 IMU 数据挂到 Telemetry 上：扣重力 → 生成纵向 / 横向 G 值。
 
-    g_source 决定重力从哪来：
-        'grav'  —— 用 GRAV 流**逐时刻**扣重力（默认）。相机自己融合的重力方向
-                   会跟着相机转，所以录制中途相机被碰、支架有弹性、传感器温漂
-                   都能自动跟上，不需要任何标定步骤。
-        'calib' —— 老路线：靠陀螺仪主轴整场定一个固定重力方向，再用 GPS 对齐
-                   低频直流。留作对照。
+    只有两步：用 `GRAV` 流**逐时刻**扣掉重力，再投影到速度坐标系。
+    没有"标定安装角"这一步 —— GRAV 是相机自己融合的重力方向，会跟着相机转，
+    所以相机中途被碰、支架有弹性、温漂都能自动跟上。
 
     没有加速度计（或数据不可用）时自动退回"只用 GPS 求导"的方案，
     此时 G 值分辨率会掉到 GPS 的采样率，但至少不会整个流程跑不下去。
@@ -341,79 +337,52 @@ def attach_imu(
     warns = tel.warnings
 
     if acc is not None and t_imu is not None and t_imu.size >= 10:
+        gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
+        has_ref = float(np.std(gl)) > 1e-3 and float(np.std(gt)) > 1e-3
+
+        if not has_ref:
+            # 没有 GPS 参考量就既没有重力方向判据、也没有投影方向，无从下手。
+            gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
+            tel.a_long_gps = gl
+            tel.a_lat_gps = gt
+            tel.t_imu = tel.t
+            tel.a_long = gl
+            tel.a_lat = gt
+            warns.append(
+                "没有可用的 GPS 参考量（速度或航向没有变化），无法定位加速度方向，"
+                "已退回仅用 GPS 求导的 G 值 —— 曲线会明显更粗糙。"
+            )
+            return tel
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            cal = imu.calibrate(
-                acc, t_imu, tel.speed, tel.t,
-                gps_x=tel.x, gps_y=tel.y, grav=grav, gyro=gyro,
-            )
-            gl, gt = imu.gps_derived_g(tel.t, tel.speed, tel.heading, kappa=tel.curvature)
-            has_ref = float(np.std(gl)) > 1e-3 and float(np.std(gt)) > 1e-3
-
             # GPS 推算的平面加速度模长 sqrt((dv/dt)² + (v·ω)²) —— 与坐标系无关，
             # 用来识别 GRAV 的轴约定、并作为扣重力是否干净的判据。
             # 注意乘 G0 换成 m/s²：gravity_from_grav() 要拿它和加速度计的模长比
-            # 较，单位不一致的话“模长比”这个判据就失效了（gps_derived_g 输出的是 g）。
+            # 较，单位不一致的话"模长比"这个判据就失效了（gps_derived_g 输出的是 g）。
             ref_mag = imu.G0 * np.hypot(
                 geo.savgol(tel.t, gl, 0.5, 2), geo.savgol(tel.t, gt, 0.5, 2)
             )
-
-            gravity = None
-            grav_est = None
-            if g_source == "grav" and grav is not None and t_grav is not None \
-                    and np.asarray(grav).size >= 9:
-                grav_est = imu.gravity_from_grav(
-                    acc, t_imu, grav, t_grav,
-                    speed_at_acc=geo.interp_to(tel.t, tel.speed, t_imu),
-                    ref_mag=geo.interp_to(tel.t, ref_mag, t_imu) if has_ref else None,
-                )
-                gravity = grav_est.vector
-
-            # 有可用的 GPS 参考量就投影到**速度坐标系**（正解）；否则退回固定车身轴。
-            # 那条退路上纵向 G 基本等于噪声（见 velocity_frame_g 的说明），必须提醒。
-            if has_ref:
-                a_long, a_lat = imu.velocity_frame_g(
-                    acc, t_imu, cal, tel.t, gl, gt, gravity=gravity
-                )
-                cal.projection = "grav" if gravity is not None else "velocity"
-            else:
-                a_long, a_lat = imu.project(acc, t_imu, cal, cutoff_hz=7.0, in_g=True)
-                cal.projection = "body"
-                cal.notes.append(
-                    "没有可用的 GPS 参考量，退回按固定车身轴投影；"
-                    "卡丁车漂移时侧滑角会污染纵向 G，此时纵向读数不可信。"
-                )
-
-            if grav_est is not None:
-                # 标定那套（陀螺仪主轴定重力、拟合偏航角、对齐低频直流）是给
-                # 固定车身轴路线用的，改用 GRAV 后这些数字不再参与计算。
-                # 把它们的提示清掉，只留 GRAV 自己的判断结果，
-                # 否则用户会看到"有 0.25 g 直流偏移，已对齐"这种已经不成立的话。
-                cal.gravity_mag = grav_est.magnitude
-                cal.gravity_source = "GRAV 流（逐时刻）"
-                cal.notes[:] = [
-                    n for n in cal.notes
-                    if not n.startswith("标定质量")
-                    and "GRAV 与加速度计的轴约定" not in n
-                    and "低频直流偏移" not in n
-                ]
-                cal.notes.insert(0, grav_est.describe())
-            # 标定内部那几条"标定质量"提示是针对**固定车身轴**诊断的，
-            # 输出已经改用速度坐标系，留着会自相矛盾
-            cal.notes[:] = [n for n in cal.notes if not n.startswith("标定质量")]
+            est = imu.gravity_from_grav(
+                acc, t_imu, grav, t_grav,
+                speed_at_acc=geo.interp_to(tel.t, tel.speed, t_imu),
+                ref_mag=geo.interp_to(tel.t, ref_mag, t_imu),
+            )
+            a_long, a_lat = imu.velocity_frame_g(
+                acc, t_imu, est.vector, tel.t, gl, gt
+            )
 
         tel.t_imu = t_imu
         tel.acc = acc
-        tel.gyro = gyro
         tel.grav = grav
-        tel.cal = cal
+        tel.gfield = imu.GField(gravity=est)
         tel.a_long = a_long
         tel.a_lat = a_lat
         tel.a_long_gps = gl
         tel.a_lat_gps = gt
-        warns.extend(cal.notes)
+        warns.extend(tel.gfield.notes)
 
-        # 用**最终输出**重新算一致性指标，覆盖标定内部那套车身轴诊断值。
+        # 用**最终输出**重新算一致性指标。
         # 只在"真正在行驶"的样本上算：静止/极低速段的加速度基本是噪声底，
         # 混进来会把相关性整体拉低，反映不出实际可用性。
         def _r(a: np.ndarray, b: np.ndarray) -> float:
@@ -430,9 +399,9 @@ def attach_imu(
         gl_s = geo.savgol(t_imu, geo.interp_to(tel.t, gl, t_imu), 0.5, 2)
         r_lat = _r(a_lat_s[moving], gt_s[moving])
         r_lon = _r(a_lon_s[moving], gl_s[moving])
-        cal.lateral_r = r_lat
-        cal.longitudinal_r = r_lon
-        cal.quality = float(np.nanmean([abs(r_lat), abs(r_lon)]))
+        tel.gfield.lateral_r = r_lat
+        tel.gfield.longitudinal_r = r_lon
+        tel.gfield.quality = float(np.nanmean([abs(r_lat), abs(r_lon)]))
 
         for nm, r, hint in (
             ("横向", r_lat, "相机可能随头部晃动，或支架松动"),
@@ -451,14 +420,11 @@ def attach_imu(
     return tel
 
 
-def load(mp4_path: str | Path, *, verbose: bool = True, g_source: str = "grav") -> Telemetry:
+def load(mp4_path: str | Path, *, verbose: bool = True) -> Telemetry:
     """
     从 GoPro MP4 加载完整遥测。
 
-    这是整个工具链的入口，对应 `read_streams()` + 清洗 + 标定的封装。
-
-    g_source 见 `attach_imu()`：'grav' 用 GRAV 流逐时刻扣重力（默认），
-    'calib' 用老的三步标定路线。
+    这是整个工具链的入口，对应 `read_streams()` + 清洗 + G 值提取的封装。
     """
     mp4_path = Path(mp4_path)
     warns: list[str] = []
@@ -526,26 +492,25 @@ def load(mp4_path: str | Path, *, verbose: bool = True, g_source: str = "grav") 
         warns.append("该视频只有 GPS5（10Hz）。HERO11 通常还会记录 18Hz 的 GPS9，"
                      "若本机固件未启用，圈速分辨率约为 0.1 s。")
 
-    # ---- IMU 标定 ----
+    # ---- IMU：G 值提取 ----
     imu_data = _select_imu(streams, warns)
     t_acc, acc = imu_data if imu_data else (None, None)
     gyro_sel = _select_gyro(streams)
+    tel.gyro = gyro_sel[1] if gyro_sel else None
     grav_stream = streams.get("GRAV")
     attach_imu(
         tel,
         t_acc,
         acc,
-        gyro=gyro_sel[1] if gyro_sel else None,
         grav=grav_stream.physical() if grav_stream is not None else None,
         t_grav=grav_stream.times if grav_stream is not None else None,
-        g_source=g_source,
     )
 
     if verbose:
         print(tel.summary())
-        if tel.cal is not None:
-            print("\n— 加速度计标定 —")
-            print(tel.cal.describe())
+        if tel.gfield is not None:
+            print("\n— G 值提取 —")
+            print(tel.gfield.describe())
         for w in dict.fromkeys(warns):  # 去重但保持顺序
             print(f"  ⚠ {w}")
 

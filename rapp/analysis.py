@@ -157,14 +157,13 @@ class SessionAnalysis:
             "duration_s": round(t.duration, 2) if t else None,
             "gps_rate_hz": round(t.gps_rate, 2) if t else None,
             "distance_m": round(float(t.dist[-1]), 1) if t else None,
-            "mount_calibration": (
+            "gfield": (
                 {
-                    "quality_r": round(t.cal.quality, 3),
-                    "gravity": round(t.cal.gravity_mag, 3),
-                    "yaw_deg": round(float(np.degrees(t.cal.yaw)), 2),
-                    "lateral_positive": "left" if t.cal.lateral_sign > 0 else "right",
+                    "quality_r": round(t.gfield.quality, 3),
+                    "gravity": round(t.gfield.gravity_mag, 3),
+                    "gravity_axis": t.gfield.gravity.describe_axis(),
                 }
-                if t and t.cal
+                if t and t.gfield
                 else None
             ),
             "gate": {

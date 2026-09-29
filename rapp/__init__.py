@@ -9,7 +9,7 @@ rapp - Race Analysis for GoPro
     gpmf.py      —— 二进制解析层。相当于 pandas.read_csv，但解析的是 GoPro 私有二进制格式
     telemetry.py —— 统一采样层。把散落的传感器流合成一张对齐的"表"（类似 DataFrame）
     geo.py       —— 地理计算层。经纬度 → 平面米制坐标（类似把球坐标投影到笛卡尔系）
-    imu.py       —— 传感器标定层。加速度计姿态对齐 + 摄像头安装角标定
+    imu.py       —— 传感器层。用 GRAV 扣重力，再把加速度投影成纵向 / 横向 G
     laps.py      —— 圈速逻辑层。自动找起终点线、切圈、算分段
     analysis.py  —— 分析层。弯道识别、轮胎摩擦圆、理论最佳圈
     report.py    —— 输出层。终端报表 + CSV/JSON
