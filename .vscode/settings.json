@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^\\.venv/bin/python analyze\\.py --selftest$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

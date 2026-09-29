@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+"""
+race-gopro —— GoPro 卡丁车遥测分析
+================================
+
+用法示例
+--------
+  # 完整分析（圈速 + 报表 + 图表 + 网页看板）
+  python analyze.py GX010123.MP4
+
+  # 再加上带 HUD 的叠加视频
+  python analyze.py GX010123.MP4 --overlay
+
+  # 只看前两圈的开视频，省时间
+  python analyze.py GX010123.MP4 --overlay --overlay-range 0,90
+
+  # 没有视频？先用合成数据看看输出长什么样
+  python analyze.py --demo
+
+  # 检查整条流水线是否正确（含标定精度自检）
+  python analyze.py --selftest
+
+  # 看看视频里到底有哪些遥测流（排查问题用）
+  python analyze.py GX010123.MP4 --list-streams
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+from rapp import analysis, charts, dashboard, demo, gpmf, laps, overlay, report, telemetry
+
+
+def _parse_range(text: str) -> tuple[float, float]:
+    try:
+        a, b = text.split(",")
+        return float(a), float(b)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError("格式应为 开始秒,结束秒，例如 0,90") from exc
+
+
+def _parse_latlon(text: str) -> tuple[float, float]:
+    try:
+        a, b = text.split(",")
+        return float(a), float(b)
+    except Exception as exc:
+        raise argparse.ArgumentTypeError("格式应为 纬度,经度，例如 31.2304,121.4737") from exc
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="race-gopro",
+        description="从 GoPro 视频中提取圈速、G 值等专业赛车遥测数据",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    p.add_argument("video", nargs="*", type=Path, help="GoPro 导出的 MP4 文件（可给多个，但只取第一个）")
+    p.add_argument("-o", "--out", type=Path, default=Path("out"), help="输出目录（默认 ./out）")
+    p.add_argument("--demo", action="store_true", help="用合成数据演示，不需要真实视频")
+
+    p.add_argument("--gate", type=_parse_latlon, metavar="纬,经",
+                   help="手动指定起终点线的经纬度（自动识别不准时使用）")
+    p.add_argument("--sectors", type=int, default=3, help="分段数量（默认 3）")
+    p.add_argument("--grid-step", type=float, default=1.0, help="圈间对比的距离网格步长，米（默认 1.0）")
+    p.add_argument("--min-laps", type=int, default=2, help="至少要有多少圈才认为识别成功（默认 2）")
+
+    p.add_argument("--no-charts", action="store_true", help="不生成 matplotlib 图表")
+    p.add_argument("--no-dashboard", action="store_true", help="不生成网页看板")
+    p.add_argument("--no-csv", action="store_true", help="不导出 CSV")
+
+    p.add_argument("--overlay", action="store_true", help="生成带 HUD 叠加的视频（耗时较长）")
+    p.add_argument("--overlay-range", type=_parse_range, metavar="开始,结束",
+                   help="只给这段时间叠加 HUD，单位秒")
+    p.add_argument("--overlay-fps", type=float, default=15.0, help="HUD 刷新率，默认 15（越低越快）")
+    p.add_argument("--overlay-crf", type=int, default=20, help="HUD 视频画质，越小越清晰（默认 20）")
+    p.add_argument("--overlay-preset", default="medium", help="x264 预设，默认 medium")
+    p.add_argument("--no-trace", action="store_true", help="HUD 里不画速度曲线小图")
+
+    p.add_argument("--list-streams", action="store_true", help="只列出视频里的遥测流，不做分析")
+    p.add_argument("--selftest", action="store_true", help="用合成数据自检整条流水线")
+    p.add_argument("-q", "--quiet", action="store_true", help="少打印一些中间信息")
+
+    return p
+
+
+def list_streams(video: Path) -> int:
+    """打印 MP4 里的轨道信息和解析出的遥测流，用于排查问题。"""
+    print(f"文件：{video}")
+    print("\n— 容器里的轨道 —")
+    for s in gpmf.probe_streams(video):
+        handler = (s.get("tags") or {}).get("handler_name", "")
+        print(f"  #{s['index']:<3} {s.get('codec_type'):<8} {s.get('codec_name', ''):<10} {handler}")
+
+    print("\n— 解析出的遥测流 —")
+    streams = gpmf.read_streams(video)
+    if not streams:
+        print("  （空）该视频里没有可解析的 GPMF 遥测数据。")
+        return 1
+    for name, st in sorted(streams.items()):
+        print(f"  {name:<8} {st.times.size:>8} 个采样点  "
+              f"{st.rate:>7.2f} Hz  单位={st.units or '?':<10} "
+              f"值域=[{st.values.min()}, {st.values.max()}]")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+
+    # ------------------------------------------------------------------
+    # 自检模式
+    # ------------------------------------------------------------------
+    if args.selftest:
+        from tests import test_gpmf
+
+        ok_parser, lines_parser = test_gpmf.run()
+        ok_demo, lines_demo = demo.selftest()
+
+        print()
+        print("\n".join(lines_parser))
+        print()
+        print("\n".join(lines_demo))
+        print()
+        print("─" * 60)
+        print(f"  GPMF 二进制解析器 : {'通过 ✓' if ok_parser else '未通过 ✗'}")
+        print(f"  IMU 标定与 G 值   : {'通过 ✓' if ok_demo else '未通过 ✗'}")
+        print("─" * 60)
+        return 0 if (ok_parser and ok_demo) else 1
+
+    # ------------------------------------------------------------------
+    # 只看遥测流
+    # ------------------------------------------------------------------
+    if args.list_streams:
+        if not args.video:
+            print("请指定要检查的视频文件。", file=sys.stderr)
+            return 2
+        return list_streams(args.video[0])
+
+    # ------------------------------------------------------------------
+    # 取数据
+    # ------------------------------------------------------------------
+    verbose = not args.quiet
+    demo_session = None
+
+    if args.demo:
+        print("使用合成数据（演示赛道）—— 不需要真实视频。")
+        demo_session = demo.make(n_laps=8, verbose=False)
+        tel = demo_session.telemetry
+        source_name = "demo"
+        video_path: Path | None = None
+        print(tel.summary())
+        if tel.cal:
+            print("\n— 加速度计标定 —")
+            print(tel.cal.describe())
+    else:
+        if not args.video:
+            print("请提供 GoPro 视频文件，或加 --demo 用合成数据体验。", file=sys.stderr)
+            return 2
+        if len(args.video) > 1:
+            print(
+                "注意：检测到多个视频文件。GoPro 长时间录制会把视频切成多段，"
+                "每段的遥测时间轴都从 0 开始，无法直接拼在一起。\n"
+                "      本工具只分析第一个文件。要分析完整场次，请先用 ffmpeg 合并：\n"
+                "        printf \"file '%s'\\n\" GX01*.MP4 > list.txt\n"
+                "        ffmpeg -f concat -safe 0 -i list.txt -c copy merged.MP4\n",
+                file=sys.stderr,
+            )
+        video_path = args.video[0]
+        if not video_path.exists():
+            print(f"找不到文件：{video_path}", file=sys.stderr)
+            return 2
+        tel = telemetry.load(video_path, verbose=verbose)
+        source_name = video_path.stem
+
+    # ------------------------------------------------------------------
+    # 分析
+    # ------------------------------------------------------------------
+    lapset = laps.compute_lapset(
+        tel,
+        gate_latlon=args.gate,
+        sectors=args.sectors,
+        grid_step=args.grid_step,
+        verbose=verbose,
+    )
+    sa = analysis.analyze(lapset, verbose=verbose)
+
+    outdir = args.out / source_name
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    report.print_report(sa)
+
+    if not args.no_csv:
+        written = report.export_csv(sa, outdir)
+        p = report.export_json(sa, outdir / "analysis.json")
+        print("\n— 数据导出 —")
+        for f in [*written, p]:
+            print(f"  {f}")
+
+    if not args.no_charts:
+        figs = charts.make_all(sa, outdir)
+        if figs:
+            print("\n— 图表 —")
+            for f in figs:
+                print(f"  {f}")
+
+    if not args.no_dashboard:
+        html = dashboard.build(sa, outdir / "dashboard.html")
+        print(f"\n— 网页看板 —\n  {html}")
+
+    # ------------------------------------------------------------------
+    # HUD 叠加视频
+    # ------------------------------------------------------------------
+    if args.overlay:
+        if video_path is None:
+            # 演示模式下没有源视频，临时生成一段测试画面
+            from rapp.demo import make_test_video
+
+            video_path = outdir / "demo_source.mp4"
+            print("\n演示模式下需要一段源视频，正在用 ffmpeg 生成测试画面…")
+            make_test_video(video_path, duration=min(40.0, tel.duration), fps=30.0)
+            print(f"  已生成 {video_path}")
+
+        out_video = outdir / f"{source_name}_hud.mp4"
+        overlay.burn(
+            video_path,
+            sa,
+            out_video,
+            fps=args.overlay_fps,
+            t_range=args.overlay_range,
+            crf=args.overlay_crf,
+            preset=args.overlay_preset,
+            show_trace=not args.no_trace,
+            verbose=True,
+        )
+        print(f"\n— HUD 视频 —\n  {out_video}")
+
+    print(f"\n全部输出位于：{outdir}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
