@@ -77,16 +77,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
         padding:11px 14px;border-radius:8px;font-size:12.5px;margin-bottom:16px;line-height:1.7;}
   .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;
         background:#232a33;color:var(--dim);margin-left:6px;}
-  /* 静态图表：直接嵌图，点开看原图 */
-  .gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
-           gap:14px;margin-top:4px;}
-  .gallery figure{margin:0;background:var(--card);border:1px solid var(--line);
-                  border-radius:10px;overflow:hidden;}
-  .gallery img{display:block;width:100%;height:auto;background:#fff;}
-  .gallery a{line-height:0;}
-  .gallery figcaption{padding:7px 10px;font-size:12px;color:var(--dim);
-                      border-top:1px solid var(--line);}
-
   /* “其他文件”区块：指向 charts/ 与 tables/ 里的产物 */
   section h3{margin:15px 0 7px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.4px;}
   section h3:first-of-type{margin-top:4px;}
@@ -141,6 +131,18 @@ _TEMPLATE = r"""<!DOCTYPE html>
   </section>
 
   <section>
+    <h2>每圈走线</h2>
+    <p class="hint">把每一圈的实测轨迹叠在一起（各圈按"距起点线的距离"对齐）。点击图例可以隐藏/显示某几圈。<b>线条几乎重合是正常的</b> —— GPS 单点噪声就有 1~3 米，真实走线差异往往只有零点几米，光看形状分不出差别，要看下面那张偏差图。x/y 轴等比例。</p>
+    <div class="chartbox square"><canvas id="cLines"></canvas></div>
+  </section>
+
+  <section>
+    <h2>每圈走线偏差</h2>
+    <p class="hint">每一圈相对<b>平均走线</b>的横向偏移：正 = 在平均线左侧，负 = 右侧。这是看走线差异真正管用的一张 —— 噪声被抵消掉了，差异直接量化成米。</p>
+    <div class="chartbox tall"><canvas id="cDev"></canvas></div>
+  </section>
+
+  <section>
     <h2>逐弯顶点速度</h2>
     <p class="hint">每个弯里速度最低的那一点。同一弯各圈差别越大，说明这个弯还没形成稳定跑法。</p>
     <div class="scroll"><table id="tCorner"></table></div>
@@ -152,7 +154,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="scroll"><table id="tLap"></table></div>
   </section>
 
-__GALLERY__
 __FILES__</div>
 
 <script>
@@ -398,6 +399,75 @@ function speedColor(s, lo, hi) {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
+// ---------- 每圈走线：把各圈的实测轨迹叠在一起 ----------
+// 各圈的轨迹已经在同一张距离网格上对齐（同一下标 = 距起点线同样的距离），
+// 所以直接画就是从同一个起跑点出发的一束线。
+const LINES = DATA.laps.filter(l => l.valid && l.path && l.path.length);
+if (LINES.length && DATA.line_extent) {
+  const ext = DATA.line_extent;
+  new Chart(document.getElementById("cLines"), {
+    type: "line",
+    data: {datasets: LINES.map((l, i) => ({
+      label: "#" + l.index + " " + l.time + (isBest(l) ? " ★" : ""),
+      data: l.path.map(p => ({x: p[0], y: p[1]})),
+      borderColor: color(i, l),
+      borderWidth: isBest(l) ? 3 : 1.4,
+      pointRadius: 0, pointHitRadius: 0, fill: false, tension: 0
+    }))},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: {mode: "nearest", intersect: false},
+      plugins: {
+        legend: {labels: {boxWidth: 14, boxHeight: 3, font: {size: 11}}},
+        tooltip: {callbacks: {label: c => c.dataset.label}}
+      },
+      // 等比例：x、y 用同一个半径（见 DATA.line_extent），容器再来一个正方形。
+      // x 必须显式声明 type:"linear" —— line 类型的 x 轴**默认是 category**，
+      // 而我们的 x 是 559xxx 这样的数值坐标，当成类别会变成几十万个刻度，
+      // 曲线全挤到最左边（踩过）。scatter 默认就是 linear，所以赛道俯视图不用写。
+      scales: {
+        x: {type: "linear", min: ext.cx - ext.half, max: ext.cx + ext.half,
+            title: {display: true, text: "东向 (m)"}},
+        y: {min: ext.cy - ext.half, max: ext.cy + ext.half,
+            title: {display: true, text: "北向 (m)"}}
+      }
+    }
+  });
+}
+
+// ---------- 每圈走线偏差：相对平均线的横向偏移 ----------
+// 为什么单给一张：GPS 单点噪声 1~3 米，而真实走线差异往往只有零点几米 ——
+// 在叠加图上噪声会把差异盖住，看起来"所有圈都跑在同一条线上"。
+// 把相对平均线的偏移单独画出来，差异才量化得出来。
+if (LINES.length) {
+  new Chart(document.getElementById("cDev"), {
+    type: "line",
+    data: {datasets: LINES.map((l, i) => ({
+      label: "#" + l.index + " " + l.time + (isBest(l) ? " ★" : ""),
+      data: (l.dev || []).map((v, k) => ({x: DATA.grid[k], y: v})),
+      borderColor: color(i, l),
+      borderWidth: isBest(l) ? 2.6 : 1.2,
+      pointRadius: 0, pointHitRadius: 0, fill: false, tension: 0
+    }))},
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: {mode: "nearest", intersect: false},
+      plugins: {
+        legend: {labels: {boxWidth: 14, boxHeight: 3, font: {size: 11}}},
+        bands: {bands: DATA.corner_bands},
+        tooltip: {callbacks: {
+          label: c => c.dataset.label + "：" + (c.raw.y >= 0 ? "偏左 " : "偏右 ")
+                      + Math.abs(c.raw.y).toFixed(2) + " m"
+        }}
+      },
+      scales: {
+        x: {type: "linear", title: {display: true, text: "距起点线 (m)"}},
+        y: {title: {display: true, text: "相对平均走线的横向偏移 (m)"},
+            ticks: {callback: v => v === 0 ? "0（平均线）" : v}}
+      }
+    }
+  });
+}
 }  // end Chart available
 
 // ---------- 表格（不依赖 Chart.js） ----------
@@ -481,38 +551,6 @@ _TABLE_FILES = [
     ("telemetry.csv", "全场高频遥测"),
     ("analysis.json", "结构化结果，喂给别的工具"),
 ]
-
-
-def _chart_gallery(outdir: Path) -> str:
-    """
-    把 `charts/` 里的静态图直接嵌进页面。
-
-    为什么要嵌而不是只留页尾链接：这一页的定位是"分析的入口"，打开就该看到全部
-    结论。而页尾那串链接长得像"附件清单"，很容易被当成"图不在这里"而忽略掉
-    （用户反馈原话：没有在 html 中看到）。
-
-    只嵌磁盘上**确实存在**的图，所以 `--no-charts` 时整块自动消失，不留破图。
-    """
-    figs = [
-        (name, desc) for name, desc in _CHART_FILES
-        if (outdir / "charts" / name).exists()
-    ]
-    if not figs:
-        return ""
-    items = "".join(
-        f'<figure><a href="charts/{name}" target="_blank" rel="noopener">'
-        f'<img src="charts/{name}" alt="{desc}" loading="lazy"></a>'
-        f"<figcaption>{desc}</figcaption></figure>"
-        for name, desc in figs
-    )
-    return (
-        "  <section>\n"
-        "    <h2>静态图表</h2>\n"
-        '    <p class="hint">上面几节是可以交互的；这几张是导出好的大图，'
-        "点任意一张可以看原图（也可以直接拿去发）。</p>\n"
-        f'    <div class="gallery">{items}</div>\n'
-        "  </section>\n"
-    )
 
 
 def _file_index(outdir: Path) -> str:
@@ -638,10 +676,12 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
     gi = np.linspace(0, ls.grid.size - 1, grid.size).astype(int)
 
     lap_json = []
+    lap_objs: list[laps.Lap] = []
     for k, lap in enumerate(ls.laps):
         if lap not in laps_used:
             continue
         dl = sa.deltas[k]
+        lap_objs.append(lap)
         lap_json.append({
             "index": lap.index,
             "valid": lap.valid,
@@ -661,7 +701,31 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
             "delta_s": [round(float(v), 3) for v in dl[gi]],
         })
 
-    # G-G 散点（抽稀）
+    # ---- 每圈走线（交互图用）----
+    # 「偏差」必须在这里算，而不能在图表 JS 里算：它是"各圈相对**平均走线**"的量，
+    # 单独一圈算不出来。法向取 +落在行进方向左手边（正 = 偏左）。
+    geo_laps = [l for l in lap_objs if l.valid and l.gx is not None]
+    if geo_laps:
+        mx = np.mean([l.gx for l in geo_laps], axis=0)
+        my = np.mean([l.gy for l in geo_laps], axis=0)
+        tgx, tgy = np.gradient(mx), np.gradient(my)
+        tn = np.hypot(tgx, tgy)
+        tn = np.where(tn < 1e-9, 1e-9, tn)
+        nx_, ny_ = -tgy / tn, tgx / tn
+    path_x: list[float] = []
+    path_y: list[float] = []
+    for item, lap in zip(lap_json, lap_objs):
+        if lap.gx is None or not geo_laps:
+            item["path"], item["dev"] = [], []
+            continue
+        item["path"] = [[round(float(lap.gx[i]), 1), round(float(lap.gy[i]), 1)]
+                        for i in gi]
+        off = (lap.gx - mx) * nx_ + (lap.gy - my) * ny_
+        item["dev"] = [round(float(off[i]), 2) for i in gi]
+        if lap.valid:
+            path_x.extend(item["path"][j][0] for j in range(len(gi)))
+            path_y.extend(item["path"][j][1] for j in range(len(gi)))
+
     lat, lon = ana.gg_points(ls)
     n_gg = 4000
     if lat.size > n_gg:
@@ -709,6 +773,14 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
         "laps": lap_json,
         "sector_labels": [f"分段{i + 1}" for i in range(ls.sector_count)],
         "corner_bands": [[round(c.d_start, 1), round(c.d_end, 1)] for c in sa.corners],
+        # 每圈走线图的等比例坐标窗口：x、y 取同一个半径，容器再做正方形，
+        # 两者同时成立 1 米横向和 1 米纵向才占同样多的像素（Chart.js 没有内置等比例轴）
+        "line_extent": ({
+            "cx": float((min(path_x) + max(path_x)) / 2),
+            "cy": float((min(path_y) + max(path_y)) / 2),
+            "half": float(max(max(path_x) - min(path_x),
+                              max(path_y) - min(path_y)) / 2 * 1.06),
+        } if path_x else None),
         "mean_lap": round(ls.mean_lap, 3) if np.isfinite(ls.mean_lap) else None,
         "mean_lap_text": laps.format_lap_time(ls.mean_lap),
         "theoretical_best": round(ls.theoretical_best, 3) if np.isfinite(ls.theoretical_best) else None,
@@ -743,7 +815,6 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
         .replace("__DIST__", f"{float(t.dist[-1]):.0f}" if t else "—")
         .replace("__DATE__", __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"))
         .replace("__FILES__", _file_index(path.parent))
-        .replace("__GALLERY__", _chart_gallery(path.parent))
     )
     path.write_text(html, encoding="utf-8")
 
