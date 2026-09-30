@@ -22,6 +22,8 @@ race-gopro —— GoPro 卡丁车遥测分析
 
   # 看看视频里到底有哪些遥测流（排查问题用）
   python analyze.py GX010123.MP4 --list-streams
+
+结果默认放在**源视频旁边**的 `<视频名>_out/` 目录（用 `-o` 可改）。
 """
 
 from __future__ import annotations
@@ -49,6 +51,53 @@ def _parse_latlon(text: str) -> tuple[float, float]:
         raise argparse.ArgumentTypeError("格式应为 纬度,经度，例如 31.2304,121.4737") from exc
 
 
+OUT_SUFFIX = "_out"
+"""输出目录名 = 视频名 + 这个后缀，放在**源视频所在目录**里。
+
+为什么不再固定放 `./out`：用户的视频往往散在不同拍摄日 / 不同移动硬盘里，
+固定一个相对路径的话，处理第二个盘不是撞名就是得手动改参数。
+放在视频旁边就永远找得到，也不会互相覆盖。
+
+带后缀而不是直接用视频名：明确标出"这是生成的"，不会和用户自己建的同名
+文件夹混在一起，也好一把删掉（`rm -rf *_out`）。
+"""
+
+
+def resolve_outdir(
+    want: Path | None, video_path: Path | None, source_name: str
+) -> Path:
+    """
+    决定结果放哪里，返回**这次分析的输出目录**（已保证存在且可写）。
+
+    优先级：
+        --out 给了       → <--out>/<视频名>
+        有源视频         → <源视频所在目录>/<视频名>_out
+        --demo（无视频） → ./out/<名字>
+    """
+    if want is not None:
+        out = want / source_name
+    elif video_path is None:
+        out = Path("out") / source_name
+    else:
+        out = video_path.resolve().parent / f"{video_path.stem}{OUT_SUFFIX}"
+        # 源目录未必可写：只读挂载、相机 SD 卡、别人的共享盘都可能拦下来。
+        # 与其跑到一半才报错，不如现在就试一下写权限，不行就退回 ./out。
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            probe = out / ".write-test"
+            probe.touch()
+            probe.unlink()
+        except OSError:
+            fallback = Path("out") / source_name
+            print(
+                f"  ⚠ 视频所在目录写不进去，结果改放 {fallback.resolve()}",
+                file=sys.stderr,
+            )
+            out = fallback
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="race-gopro",
@@ -57,7 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=__doc__,
     )
     p.add_argument("video", nargs="*", type=Path, help="GoPro 导出的 MP4 文件（可给多个，但只取第一个）")
-    p.add_argument("-o", "--out", type=Path, default=Path("out"), help="输出目录（默认 ./out）")
+    p.add_argument("-o", "--out", type=Path, default=None,
+                   help=f"输出根目录。默认放在源视频旁边的 <视频名>{OUT_SUFFIX}/，"
+                        "这样视频散在不同盘 / 不同文件夹时结果会跟着走；--demo 时默认 ./out")
     p.add_argument("--demo", action="store_true", help="用合成数据演示，不需要真实视频")
 
     p.add_argument("--gate", type=_parse_latlon, metavar="纬,经",
@@ -247,8 +298,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     sa = analysis.analyze(lapset, verbose=verbose)
 
-    outdir = args.out / source_name
+    outdir = resolve_outdir(args.out, video_path, source_name)
     outdir.mkdir(parents=True, exist_ok=True)
+    # 早早就把落点报出来：HUD 那段可能要跑好几分钟，用户想知道东西会去哪儿
+    if verbose:
+        print(f"\n输出目录：{outdir}")
 
     # 输出按用途分类，避免十几个文件平铺在一层里找不着北：
     #   charts/   图表

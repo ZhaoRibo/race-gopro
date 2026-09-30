@@ -48,7 +48,8 @@ python3 -m venv .venv
 
 会生成一条合成赛道的数据，把整条输出链路（报表、图表、看板、HUD 视频）都跑一遍。
 
-结果都在 `out/<视频文件名>/` 目录里。
+结果都在**源视频旁边**的 `<视频文件名>_out/` 目录里 —— 视频拷到哪儿，结果就在哪儿，
+不会散在别处。（加 `-o 目录` 可以改成放到指定位置；用 `--demo` 时默认 `./out/`。）
 
 ---
 
@@ -68,10 +69,10 @@ python3 -m venv .venv
 
 ## 输出文件说明
 
-跑完一次分析，`out/<视频名>/` 的结构是：
+跑完一次分析，`<视频名>_out/` 的结构是（下面以 `video/GX010046.MP4` 为例）：
 
 ```
-out/GX010046/
+video/GX010046_out/          ← 就在源视频旁边
 ├── dashboard.html          ← 双击打开，圈速 / G 值 / 弯道分析全在里面
 ├── GX010046_hud.mp4        ← 带 HUD 的叠加视频（需要加 --overlay）
 ├── charts/                 图表
@@ -80,6 +81,7 @@ out/GX010046/
 │   ├── delta.png
 │   ├── gg_diagram.png
 │   ├── track_map.png
+│   ├── lap_lines.png
 │   └── corner_apex.png
 └── tables/                 数据表
     ├── laps.csv
@@ -326,7 +328,8 @@ G 值的重力扣除用 GoPro 自己记录的 `GRAV` 流逐时刻完成。原理
   --min-laps N              至少几圈才算识别成功，默认 2
 
 输出开关
-  -o, --out DIR             输出根目录，默认 ./out
+  -o, --out DIR             输出根目录。默认放在**源视频旁边**的 <视频名>_out/，
+                            这样视频散在不同盘 / 不同文件夹时结果会跟着走
   --no-charts               不生成图表
   --no-dashboard            不生成网页看板
   --no-csv                  不导出 CSV
