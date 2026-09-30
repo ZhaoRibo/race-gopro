@@ -54,7 +54,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):      # 流被换成不支持重配置的（比如某些管道）
         pass
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 """版本号。改这里就够了（会写进 macOS 的 Info.plist 和产物文件名）。"""
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

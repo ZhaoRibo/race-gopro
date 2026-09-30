@@ -627,7 +627,8 @@ race-gopro/
 │   ├── app.py           网页应用的入口：选视频 → 分析 → 跳看板
 │   └── demo.py          合成数据生成器（兼做自检）
 └── tests/
-    └── test_gpmf.py     GPMF 解析器回归测试
+    ├── test_gpmf.py     GPMF 解析器回归测试
+    └── test_paths.py    文件名的跨平台检查（防 Windows checkout 失败）
 ```
 
 数据在包里是这么往下流的（想加功能就沿着这条链找）：
@@ -688,6 +689,15 @@ MP4 ──gpmf.py──▶ telemetry.py ──┬── imu.py ─────�
 
 ```bash
 .venv/bin/python -m tests.test_gpmf
+```
+
+`tests/test_paths.py` 是另一类检查：**文件名在 Windows 上能不能用**。
+macOS 允许文件名里带反斜杠、末尾带空格，Windows 不允许 —— 而这种问题本地毫无
+征兆，只会在 CI 的 Windows 任务 checkout 那一步炸掉（连一行代码都跑不到）。
+改完东西顺手跑一下：
+
+```bash
+.venv/bin/python -m tests.test_paths
 ```
 
 想用 pytest 的话得先装（它不在运行依赖里）：
