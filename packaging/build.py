@@ -32,7 +32,6 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.request
 import zipfile
 from pathlib import Path
 
@@ -44,6 +43,29 @@ DIST = ROOT / "dist"
 VERSION = "0.1.0"
 """版本号。改这里就够了（会写进 macOS 的 Info.plist 和产物文件名）。"""
 
+_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+"""下载时带的 User-Agent（有些站点会拦不认识客户端的连接）。"""
+
+_CURL = shutil.which("curl") or "curl"
+"""用 curl 下载，不用 urllib。
+
+踩过的坑：urllib 连 osxexperts 的 TLS 握手直接被对端断掉
+（`SSL: UNEXPECTED_EOF_WHILE_READING`，带浏览器 UA 也没用），而同一个地址
+curl 一点事没有。构建机器上（macOS / Windows / Linux 的镜像）都自带 curl，
+换过去最省事，顺带还白拿了重试、重定向、代理这些现成的好处。
+"""
+
+
+def _fetch_text(url: str) -> str:
+    """取一段文本（比如网页），失败直接报出来。"""
+    req = subprocess.run([_CURL, "-fsSL", "--retry", "3", "--retry-delay", "2",
+                          "--connect-timeout", "30", "-A", _UA, url],
+                         capture_output=True, text=True)
+    if req.returncode != 0:
+        raise RuntimeError(f"取不到 {url}\n{(req.stderr or '').strip()}")
+    return req.stdout
+
 
 # ==========================================================================
 # 第一步：把 ffmpeg / ffprobe 弄到手
@@ -53,9 +75,15 @@ def _download(url: str, dest: Path) -> Path:
         print(f"  ✓ 已经有 {dest.name}（{dest.stat().st_size / 1e6:.0f} MB），跳过下载")
         return dest
     print(f"  ↓ {url}")
+    dest.parent.mkdir(parents=True, exist_ok=True)   # curl 不会自己建目录
     tmp = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(url, timeout=120) as resp, tmp.open("wb") as fh:
-        shutil.copyfileobj(resp, fh, length=1 << 20)
+    # -sS 很关键：不加的话 curl 的进度条会和真正的错误一起汇到 stderr，
+    # 报错时只截前 300 字就是一堆进度条，看不到原因。
+    req = subprocess.run([_CURL, "-fLsS", "--retry", "3", "--retry-delay", "2",
+                          "--connect-timeout", "30", "-A", _UA,
+                          "-o", str(tmp), url], capture_output=True, text=True)
+    if req.returncode != 0:
+        raise RuntimeError(f"下载 {url} 失败\n{(req.stderr or '').strip()}")
     tmp.replace(dest)
     print(f"  ✓ {dest.name}（{dest.stat().st_size / 1e6:.0f} MB）")
     return dest
@@ -97,8 +125,7 @@ def _osx_experts_sources() -> list[tuple[str, str]]:
     """
     url = "https://www.osxexperts.net/"
     print(f"  查一下 osxexperts 现在提供哪个版本：{url}")
-    with urllib.request.urlopen(url, timeout=60) as resp:
-        html = resp.read().decode("utf-8", "replace")
+    html = _fetch_text(url)
     out = []
     for name in ("ffmpeg", "ffprobe"):
         vers = [int(v) for v in re.findall(rf"{name}(\d+)arm\.zip", html)]
