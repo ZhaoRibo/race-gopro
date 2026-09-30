@@ -170,7 +170,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   <section id="hudSec">
     <h2>单圈 HUD 视频</h2>
-    <p class="hint">选一圈，点按钮就生成这一圈的 HUD 叠加视频，自动在本圈前后各留 <b>__PAD__</b> 秒（过线那一瞬间才不会被切掉）。<b>只出片</b>，不会重跑分析、也不会重新生成图表和看板。</p>
+    <p class="hint">选一圈，点按钮就生成这一圈的 HUD 叠加视频，自动在本圈前后各留 <b>__PAD__</b> 秒（过线那一瞬间才不会被切掉）。下拉里第一项是<b>整段视频</b>，就是把全片都烧上 HUD。<b>只出片</b>，不会重跑分析、也不会重新生成图表和看板。</p>
     <div class="hudrow">
       <select id="hudLap"></select>
       <button class="primary" id="hudGo" type="button">生成 HUD 视频</button>
@@ -265,13 +265,20 @@ const isBest = l => BEST && l.index === BEST.index;
   const rangeEl = document.getElementById("hudRange");
 
   const PAD = DATA.hud.pad;
+  const DURATION = DATA.hud.duration;
   // 出片范围 = 本圈起止各留 PAD 秒，再截到时长以内。
   // 规则和 rapp/serve.py 的 lap_range() 必须一致，不然页面显示的和实际切的会不一样。
   const RANGE = {};
   DATA.laps.forEach(l => {
     RANGE[l.index] = [Math.max(0, l.t_start - PAD),
-                      Math.min(DATA.hud.duration, l.t_end + PAD)];
+                      Math.min(DURATION, l.t_end + PAD)];
   });
+
+  // 下拉第一项是整段视频（不加前后余量，就是全片）
+  const fullOpt = document.createElement("option");
+  fullOpt.value = "full";
+  fullOpt.textContent = "整段视频 · " + (DURATION / 60).toFixed(1) + " 分钟";
+  sel.appendChild(fullOpt);
 
   DATA.laps.forEach(l => {
     const o = document.createElement("option");
@@ -281,6 +288,16 @@ const isBest = l => BEST && l.index === BEST.index;
   });
   if (BEST) sel.value = String(BEST.index);
 
+  let idleMsg = "";          // 默认提示语，选回单圈时恢复用
+  let fullEst = null;         // 整段的耗时/体积粗估，ping 回来才知道
+
+  const isFull = () => sel.value === "full";
+  const targetName = () => isFull() ? "整段" : ("第 " + sel.value + " 圈");
+  function fmtMin(sec) {
+    if (sec < 90) return Math.round(sec) + " 秒";
+    return (sec / 60).toFixed(sec < 600 ? 1 : 0) + " 分钟";
+  }
+
   let server = null;     // ping 通了才有值
   let job = null;        // 正在跑的任务号
   let timer = null;
@@ -288,9 +305,20 @@ const isBest = l => BEST && l.index === BEST.index;
   const say = html => { msg.innerHTML = html; };
 
   function showRange() {
+    if (isFull()) {
+      rangeEl.textContent = "整段 0 → " + DURATION.toFixed(1) + " s（"
+                          + (DURATION / 60).toFixed(1) + " 分钟）";
+      if (fullEst) {
+        say('<span class="bad">整段是全片，粗估要跑 ' + fmtMin(fullEst.sec)
+            + "，输出大约 " + (fullEst.mb / 1024).toFixed(1) + " GB</span>"
+            + "（估的是编码时间，用的是源视频分辨率）。");
+      }
+      return;
+    }
     const r = RANGE[sel.value];
     rangeEl.textContent = r ? ("出片范围 " + r[0].toFixed(1) + " → " + r[1].toFixed(1)
-                               + " s（含前后 " + PAD + " 秒）") : "";
+                              + " s（含前后 " + PAD + " 秒）") : "";
+    if (idleMsg) say(idleMsg);
   }
 
   function setBusy(on) {
@@ -308,9 +336,9 @@ const isBest = l => BEST && l.index === BEST.index;
         if (j.state === "running") {
           const pct = j.pct * 100;
           fill.style.width = pct.toFixed(0) + "%";
-          say("正在生成第 " + j.lap + " 圈… <b>" + pct.toFixed(0) + "%</b>"
-              + "（已用 " + j.elapsed.toFixed(0) + " s）<br>"
-              + "编码用的是源视频分辨率，一圈大概要几分钟，页面别关就行。");
+          say("正在生成" + j.label + "… <b>" + pct.toFixed(0) + "%</b>"
+              + "（已用 " + fmtMin(j.elapsed) + "）<br>"
+              + "编码用的是源视频分辨率，页面别关就行。");
           timer = setTimeout(poll, 700);
           return;
         }
@@ -318,8 +346,8 @@ const isBest = l => BEST && l.index === BEST.index;
         setBusy(false);
         if (j.state === "done") {
           fill.style.width = "100%";
-          say('<span class="ok">✓ 第 ' + j.lap + " 圈生成好了</span>，用时 "
-              + j.elapsed.toFixed(0) + " s。<br>"
+          say('<span class="ok">✓ ' + j.label + " 生成好了</span>，用时 "
+              + fmtMin(j.elapsed) + "。<br>"
               + '<a href="' + j.url + '" target="_blank">▶ 点这里播放</a><br>'
               + "文件：<b>" + j.path + "</b>");
         } else if (j.state === "cancelled") {
@@ -341,14 +369,15 @@ const isBest = l => BEST && l.index === BEST.index;
   function start() {
     if (!server) return;
     if (job) return;
-    const lap = parseInt(sel.value, 10);
+    const full = isFull();
+    const lap = full ? null : parseInt(sel.value, 10);
     setBusy(true);
     fill.style.width = "0%";
-    say("正在准备第 " + lap + " 圈…");
+    say("正在准备" + targetName() + "…");
     fetch("api/hud", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({lap: lap})
+      body: JSON.stringify(full ? {full: true} : {lap: lap})
     })
       .then(r => r.json())
       .then(j => {
@@ -397,9 +426,12 @@ const isBest = l => BEST && l.index === BEST.index;
     .then(r => r.json())
     .then(info => {
       server = info;
+      fullEst = info.full_est || null;
+      idleMsg = "本地服务已连上（" + (info.source || "源视频") + "）。"
+              + "选好圈（或整段）点「生成 HUD 视频」就行。";
       setBusy(false);
-      say("本地服务已连上（" + (info.source || "源视频") + "）。"
-          + "选好圈点「生成 HUD 视频」就行。");
+      say(idleMsg);
+      showRange();
     })
     .catch(() => {
       server = null;

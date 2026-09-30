@@ -19,9 +19,10 @@
 
 接口（都在 /api/ 下）：
     GET  /api/ping               探活。看板用它判断按钮能不能用
-    POST /api/hud   {"lap": 8}   开始生成第 8 圈的 HUD，返回任务号
-    GET  /api/hud?id=xxx         查进度
-    POST /api/hud/cancel {"id"}  取消
+    POST /api/hud   {"lap": 8}    开始生成第 8 圈的 HUD，返回任务号
+    POST /api/hud   {"full": true} 整段视频
+    GET  /api/hud?id=xxx           查进度
+    POST /api/hud/cancel {"id"}    取消
     POST /api/gate  {"x": 12.3, "y": -40.5}   用这个位置当计时线重算整场
     POST /api/gate  {"auto": true}             恢复成自动搜索的计时线
 
@@ -50,6 +51,16 @@ from . import report
 PAD_SECONDS = 5.0
 """出片时在每圈前后各留几秒 —— 不然过线那一瞬间的内容会被切掉。"""
 
+_MS_PER_FRAME = {
+    # 编一帧要多少毫秒。2704×2028 实测：veryfast 约 31 ms、medium 约 51 ms，
+    # 只用来给网页一个量级上的预期，不追求准。
+    "ultrafast": 22.0, "superfast": 26.0, "veryfast": 31.0,
+    "faster": 38.0, "fast": 44.0, "medium": 51.0, "slow": 80.0,
+}
+_DEFAULT_MS_PER_FRAME = 60.0
+_MB_PER_SECOND = 7.0
+"""输出视频每秒大约多少 MB（crf 20 附近的实测值，同样只是粗估）。"""
+
 _HOST = "127.0.0.1"
 """只监听本地回环。这个服务能启动 ffmpeg，绝不能暴露到局域网。"""
 
@@ -65,8 +76,11 @@ _CONTENT_TYPES = {
 class _Job:
     """一次出片任务。跑在自己的线程里，状态由网页轮询读取。"""
 
-    def __init__(self, lap_index: int, t0: float, t1: float, out_path: Path) -> None:
+    def __init__(self, label: str, lap_index: int | None, t0: float, t1: float,
+                 out_path: Path) -> None:
         self.id = uuid.uuid4().hex[:12]
+        self.label = label
+        """给网页看的名字：「第 8 圈」或「整段」。"""
         self.lap = lap_index
         self.t0 = t0
         self.t1 = t1
@@ -104,6 +118,19 @@ class _State:
         self.jobs: dict[str, _Job] = {}
         self.lock = threading.Lock()
         self._rebuild_lock = threading.Lock()
+        # 出片耗时的粗估要用到源视频帧率（输出帧率跟的是源视频）
+        try:
+            self.src_fps = float(overlay.video_info(self.video)["fps"])
+        except Exception:                      # noqa: BLE001 — 估不准也不该影响出片
+            self.src_fps = 30.0
+
+    def estimate(self, seconds: float) -> dict:
+        """这段时间的片子大约要跑多久、多大。纯粗估，给用户一个心理准备。"""
+        ms = _MS_PER_FRAME.get(self.preset, _DEFAULT_MS_PER_FRAME)
+        return {
+            "sec": round(seconds * self.src_fps * ms / 1000.0, 1),
+            "mb": round(seconds * _MB_PER_SECOND, 1),
+        }
 
     # ---- 圈的起止时间 ----
     def lap_range(self, lap_index: int) -> tuple[float, float]:
@@ -176,17 +203,28 @@ class _State:
         finally:
             self._rebuild_lock.release()
 
-    def start(self, lap_index: int) -> _Job:
+    def start(self, lap_index: int | None) -> _Job:
+        """lap_index 给 None 就是整段视频（不加前后余量，就是全片）。"""
         with self.lock:
             busy = self.running()
             if busy is not None:
                 raise RuntimeError(
-                    f"第 {busy.lap} 圈还在生成中（{busy.pct * 100:.0f}%）。"
+                    f"{busy.label}还在生成中（{busy.pct * 100:.0f}%）。"
                     "编码会吃满所有核心，同时跑两个只会两个都变慢。"
                 )
-            t0, t1 = self.lap_range(lap_index)
-            out = self.outdir / f"{self.video.stem}_hud_lap{lap_index}.mp4"
-            job = _Job(lap_index, t0, t1, out)
+            if lap_index is None:
+                tele = self.sa.lapset.telemetry
+                duration = tele.duration if tele is not None else 0.0
+                if duration <= 0:
+                    raise ValueError("读不到视频时长，出不了整段。")
+                t0, t1 = 0.0, duration
+                label = "整段"
+                out = self.outdir / f"{self.video.stem}_hud.mp4"
+            else:
+                t0, t1 = self.lap_range(lap_index)
+                label = f"第 {lap_index} 圈"
+                out = self.outdir / f"{self.video.stem}_hud_lap{lap_index}.mp4"
+            job = _Job(label, lap_index, t0, t1, out)
             self.jobs[job.id] = job
             # 顺手清掉两小时前的旧任务，免得一直堆在内存里
             cutoff = time.time() - 7200
@@ -206,7 +244,7 @@ class _State:
     def _run(self, job: _Job) -> None:
         # 这些 print 都要 flush：日志被重定向到文件时 stdout 是块缓冲的，
         # 不 flush 的话中途 Ctrl+C 会把出片记录全丢掉
-        print(f"\n[HUD] 第 {job.lap} 圈 {job.t0:.1f}~{job.t1:.1f} s 开始生成…", flush=True)
+        print(f"\n[HUD] {job.label} {job.t0:.1f}~{job.t1:.1f} s 开始生成…", flush=True)
         try:
             overlay.burn(
                 self.video, self.sa, job.out,
@@ -223,7 +261,7 @@ class _State:
             job.state, job.msg = "error", f"{type(exc).__name__}: {exc}"
         finally:
             job.elapsed = time.time() - job.started
-            print(f"[HUD] 第 {job.lap} 圈 {job.state}，用时 {job.elapsed:.0f} s", flush=True)
+            print(f"[HUD] {job.label} {job.state}，用时 {job.elapsed:.0f} s", flush=True)
             if job.state == "done":
                 print(f"       {job.out}", flush=True)
 
@@ -232,6 +270,7 @@ class _State:
         return {
             "id": job.id,
             "lap": job.lap,
+            "label": job.label,
             "state": job.state,
             "pct": round(job.pct, 4),
             "elapsed": round(job.elapsed or (time.time() - job.started), 1),
@@ -352,12 +391,15 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
 
             if path == "/api/ping":
                 tele = state.sa.lapset.telemetry
+                duration = float(tele.duration) if tele is not None else 0.0
                 self._json({
                     "ok": True,
                     "source": tele.source if tele is not None else "",
                     "n_laps": len(state.sa.lapset.laps),
                     "pad": PAD_SECONDS,
                     "busy": state.running() is not None,
+                    "duration": round(duration, 3),
+                    "full_est": state.estimate(duration),
                 })
                 return
 
@@ -381,11 +423,11 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
             body = self._body()
             if path == "/api/hud":
                 try:
-                    job = state.start(int(body.get("lap")))
+                    job = state.start(None if body.get("full") else int(body.get("lap")))
                 except (KeyError, ValueError, TypeError, RuntimeError) as exc:
                     self._json({"error": str(exc)}, 400)
                 else:
-                    self._json({"id": job.id, "lap": job.lap,
+                    self._json({"id": job.id, "lap": job.lap, "label": job.label,
                                 "range": [round(job.t0, 3), round(job.t1, 3)]})
                 return
             if path == "/api/hud/cancel":
