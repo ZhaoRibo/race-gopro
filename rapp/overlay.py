@@ -340,7 +340,10 @@ def render_hud_frame(
     # 纵向 G 条和 G-G 圆盘要看起来像一套：条高 = 圆盘直径，上下也和圆盘对齐；
     # 两个标签共用同一条基线，两个数值也统一字号。改这里两边一起变。
     r = px(96)
-    cx, cy = px(430), H - px(196)
+    # 圆盘连同它上面那组「横向」读数整块左移，靠近左边的纵向 G 读数。
+    # 它不能随便选：横向那一列宽约 px(126)，要让它和纵向读数的右缘之间正好
+    # 留一个 M 的空当，圆心就得落在 px(265) —— 再往右两组读数又离得远了。
+    cx, cy = px(265), H - px(196)
     bar_w = px(60)
     bar_h = 2 * r                              # 与圆盘直径等高
     bx = M                                     # 和顶部卡片的左边线对齐
@@ -428,13 +431,12 @@ def render_hud_frame(
     # 「横向」用中文字体、数字用等宽字体分开画：等宽字体不含中文字形，
     # 混在一串里会把中文变成豆腐块；而数字用等宽才能在跳动时不左右飘。
     y_lab = lab_y
-    # 和纵向 G 一模一样的排法（标签在上、数值在下），左边缘也对齐成同一行的两列。
-    # 原来把这一块居中对着圆盘，结果离左边的纵向 G 读数太远，看着像两块不相干的东西。
-    lat_x = bx + px(150)
-    d.text((lat_x, y_lab), "横向", font=lab_sans, fill=_DIM, anchor="ls")
-    d.text((lat_x, y_lab + px(46)),
+    # 和纵向 G 一个排法：标签在上、数值在下，两行都居中对着圆盘。
+    # 位置不在这里管 —— 圆盘跟着这一块一起动，只要改上面的 cx 就行。
+    d.text((cx, y_lab), "横向", font=lab_sans, fill=_DIM, anchor="ms")
+    d.text((cx, y_lab + px(46)),
            f"{a_lat:+.2f} g" if np.isfinite(a_lat) else "-- g",
-           font=lab_num, fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ls")
+           font=lab_num, fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ms")
 
     # ------------------------------------------------------------------
     # 右上：本圈速度曲线 + 最快圈参考 + 当前位置游标
