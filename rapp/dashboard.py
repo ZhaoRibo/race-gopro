@@ -459,6 +459,7 @@ _CHART_FILES = [
     ("delta.png", "相对最快圈的时间差"),
     ("gg_diagram.png", "G-G 摩擦圆"),
     ("track_map.png", "赛道俯视图"),
+    ("lap_lines.png", "每圈走线对比"),
     ("corner_apex.png", "逐弯顶点速度"),
 ]
 _TABLE_FILES = [

@@ -277,7 +277,120 @@ def plot_track_map(sa: ana.SessionAnalysis, path: Path) -> Path:
     ax.set_aspect("equal")
     ax.set_xlabel("东向 (m)")
     ax.set_ylabel("北向 (m)")
-    ax.set_title(f"赛道俯视图 — 按速度着色（第 {best.index} 圈，{laps.format_lap_time(best.duration)}）")
+    # 标题里必须写清这是"平均走线"：数据是所有有效圈按距离对齐后逐点取平均，
+    # 不是某一圈的实测轨迹。写"第 N 圈"会让人以为在看那一圈的真实走线。
+    ax.set_title(
+        f"赛道俯视图 — 按速度着色（{len(laps_ok)} 个有效圈的平均走线）\n"
+        f"最快圈 #{best.index} {laps.format_lap_time(best.duration)}"
+    )
+    fig.savefig(path)
+    plt.close(fig)
+    return path
+
+
+def plot_lap_lines(sa: ana.SessionAnalysis, path: Path) -> Path:
+    """
+    每圈走线对比图。
+
+    左：把所有有效圈的轨迹叠在一起，一眼看出哪几圈走线不同。
+    右：每圈相对**平均走线**的横向偏差（+ 左 / − 右），纵轴是"距起点线多少米"。
+
+    为什么需要右边这一栏：GPS 单点噪声就有 1~3 米，而真实走线差异往往只有
+    零点几米到一两米 —— 直接叠加两条线时**噪声会把差异盖住**。右边把相对于
+    平均走线的偏移单独抽出来画，差异才看得出来（而且平滑之后噪声只有几十厘米）。
+    """
+    ls = sa.lapset
+    best = ls.best_lap
+    if best is None or best.gx is None:
+        return path
+    ok = [l for l in ls.laps if l.valid and l.gx is not None]
+    if not ok:
+        return path
+
+    # 每圈的走线先做一次轻平滑。窗口按**距离**取 2.5 米（对应 0.35 秒左右，
+    # 见 README 里"轨迹平滑窗口不能大"的说明）—— 再大就会把卡丁车的弯抹圆。
+    smooth_m = 2.5
+    step = float(ls.grid[1] - ls.grid[0]) if ls.grid.size > 1 else 1.0
+    win = max(3, int(round(smooth_m / max(step, 1e-6))))
+    if win % 2 == 0:
+        win += 1
+
+    def _smooth(a: np.ndarray) -> np.ndarray:
+        from scipy.signal import savgol_filter
+
+        w = min(win, a.size - (1 - a.size % 2))
+        if w < 3 or w > a.size:
+            return a
+        return savgol_filter(a, w, 2, mode="interp")
+
+    lines = [(l, _smooth(l.gx), _smooth(l.gy)) for l in ok]
+    mean_x = np.mean([g[1] for g in lines], axis=0)
+    mean_y = np.mean([g[2] for g in lines], axis=0)
+
+    # 平均走线的切向 → 法向（+ 指向行进方向的左手边）
+    tx = np.gradient(mean_x)
+    ty = np.gradient(mean_y)
+    tn = np.hypot(tx, ty)
+    tn = np.where(tn < 1e-9, 1e-9, tn)
+    nx, ny = -ty / tn, tx / tn
+
+    # 图幅按赛道真实长宽比开，配合 set_aspect("equal") 才不会把赛道拉变形
+    w = float(np.ptp(mean_x))
+    h = float(np.ptp(mean_y))
+    longest = max(w, h, 1e-6)
+    base = 7.2
+    fig, (ax, ax2) = plt.subplots(
+        1, 2, figsize=(base * 2 + 1.6, base * max(h / longest, 0.45)),
+        gridspec_kw={"width_ratios": [max(w / longest, 0.45), 1.0]},
+    )
+
+    # ---- 左：叠加走线 ----
+    for k, (lap, gx, gy) in enumerate(lines):
+        is_best = lap is best
+        ax.plot(gx, gy, color=_lap_color(k, lap, best), linewidth=2.6 if is_best else 1.5,
+                alpha=1.0 if is_best else 0.75, solid_capstyle="round",
+                zorder=6 if is_best else 3, label=_label(lap, best))
+
+    g = ls.gate
+    nv = np.array([-g.direction[1], g.direction[0]])
+    ax.plot([g.x - nv[0] * 14, g.x + nv[0] * 14],
+            [g.y - nv[1] * 14, g.y + nv[1] * 14],
+            color="black", linewidth=3.0, solid_capstyle="butt", zorder=7)
+    for c in sa.corners:
+        i = int(np.searchsorted(ls.grid, c.d_apex))
+        i = min(i, mean_x.size - 1)
+        ax.annotate(c.name, (mean_x[i], mean_y[i]), textcoords="offset points",
+                    xytext=(0, 9), ha="center", fontsize=7.5, color="#2c3e50", zorder=8)
+    ax.set_aspect("equal")
+    ax.set_xlabel("东向 (m)")
+    ax.set_ylabel("北向 (m)")
+    ax.set_title("每圈走线叠加", fontsize=11)
+    ax.legend(fontsize=7, ncols=2, loc="best", framealpha=0.9)
+    ax.grid(alpha=0.15)
+
+    # ---- 右：相对平均走线的横向偏差 ----
+    for k, (lap, gx, gy) in enumerate(lines):
+        offset = (gx - mean_x) * nx + (gy - mean_y) * ny
+        is_best = lap is best
+        ax2.plot(offset, ls.grid, color=_lap_color(k, lap, best),
+                 linewidth=2.2 if is_best else 1.3,
+                 alpha=1.0 if is_best else 0.7, zorder=6 if is_best else 3)
+    ax2.axvline(0.0, color="black", linewidth=1.0, alpha=0.6, zorder=4)
+    ax2.axhline(0.0, color="black", linewidth=1.0, alpha=0.6, zorder=4)
+    for c in sa.corners:
+        ax2.axhline(c.d_apex, color="#95a5a6", linewidth=0.6, alpha=0.35, zorder=1)
+    ax2.set_xlabel("相对平均走线的横向偏移 (m)　← 右　　左 →")
+    ax2.set_ylabel("距起点线 (m)")
+    ax2.set_title("每圈走线偏差", fontsize=11)
+    ax2.grid(alpha=0.15)
+    ax2.invert_yaxis()  # 和赛道图一致：起点在上，往下走
+
+    fig.suptitle(
+        f"每圈走线对比（粗线 = 最快圈 #{best.index}；"
+        f"GPS 单点噪声 1~3 m，已做 {smooth_m:.0f} m 平滑）",
+        fontsize=11.5,
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(path)
     plt.close(fig)
     return path
@@ -325,6 +438,7 @@ def make_all(sa: ana.SessionAnalysis, outdir: str | Path) -> list[Path]:
         ("delta.png", plot_delta),
         ("gg_diagram.png", plot_gg),
         ("track_map.png", plot_track_map),
+        ("lap_lines.png", plot_lap_lines),
         ("corner_apex.png", plot_corner_apex),
     ]
     out: list[Path] = []
