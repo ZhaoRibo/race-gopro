@@ -48,7 +48,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import analysis as ana
-from . import charts
 from . import dashboard
 from . import laps
 from . import overlay
@@ -273,6 +272,12 @@ class _State:
                 report.export_csv(sa, self.outdir / "tables")
                 report.export_json(sa, self.outdir / "tables" / "analysis.json")
             if self.write_charts:
+                # 延迟导入 charts（= 延迟导入 matplotlib）。为什么：matplotlib
+                # 第一次 import 会扫一遍系统字体建缓存，有些机器要十几秒 —— 而
+                # 网页应用会先 import serve，那十几秒就搭在启动上，用户看到的是
+                # "双击了没反应"。出图反正只在重算计时线时才需要，那时再导不迟。
+                from . import charts
+
                 charts.make_all(sa, self.outdir / "charts")
             if self.write_dashboard:
                 dashboard.build(sa, self.outdir / "dashboard.html", hud_pad=PAD_SECONDS)

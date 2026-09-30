@@ -33,6 +33,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -44,14 +45,114 @@ from urllib.parse import parse_qs, urlparse
 
 from . import serve, telemetry
 
-_ROOT = Path(__file__).resolve().parent.parent
-"""仓库根目录。analyze.py 在这里，它是脚本不是包，所以得手动加进 sys.path。"""
+_FROZEN = bool(getattr(sys, "frozen", False))
+"""是不是被打包成独立 App 了（PyInstaller）。打包后路径规则全变。"""
 
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+_BUNDLE = Path(sys._MEIPASS) if getattr(sys, "_MEIPASS", None) else None  # noqa: SLF001
+"""打包后的资源目录：macOS 上在 .app/Contents/Frameworks，Windows 上在 _internal。"""
 
-_RECENT = _ROOT / ".race-gopro-recent.json"
-"""最近打开过的视频。放仓库根、已 gitignore —— 换台机器不该带着别人的路径。"""
+if not _FROZEN:
+    # 只有从源码跑才需要：analyze.py 是脚本不是包，得手动把仓库根加进搜索路径。
+    # 打包后它已经作为模块打进去了，不用（也不能）这么干。
+    _ROOT = Path(__file__).resolve().parent.parent
+    if str(_ROOT) not in sys.path:
+        sys.path.insert(0, str(_ROOT))
+
+
+def _data_dir() -> Path:
+    """
+    放"最近打开过的视频"、日志这些用户数据的地方。
+
+    打包成 App 之后不能再往程序自己里面写：macOS 的 .app 是只读的，
+    Windows 装在 Program Files 里也没权限。所以统一按各系统惯例放。
+    """
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support" / "race-gopro"
+    elif os.name == "nt":
+        base = Path(os.environ.get("APPDATA") or Path.home()) / "race-gopro"
+    else:
+        share = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+        base = Path(share) / "race-gopro"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except OSError:                      # 只读的家目录之类，退到临时目录
+        base = Path(tempfile.gettempdir()) / "race-gopro"
+        base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _redirect_output(log_path: Path) -> None:
+    """
+    把自己所有的输出接到日志文件上。
+
+    打包成"没有控制台"的应用之后，Windows 上 sys.stdout 干脆是 None，
+    随便一句 print 就会抛异常把程序打死；macOS 上虽然有个 /dev/null，但
+    双击启动本来也没有终端可看。所以打包后一律写日志 ——
+    出问题时那句"看日志"才有东西可看。
+    """
+    if not _FROZEN:
+        return
+    try:
+        fh = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    sys.stdout = fh
+    sys.stderr = fh
+
+
+def _prepare_matplotlib() -> None:
+    """
+    把打包时预建好的 matplotlib 字体缓存放到用户目录，并让它用那份。
+
+    为什么：matplotlib 第一次 import 会扫一遍系统所有字体建缓存，实测要十几秒。
+    而那会儿界面还什么都没显现，用户看到的只是"双击了没反应"（然后多半会再双击
+    一次）。所以构建时先把缓存建好、打进包，首次运行拷过去。
+
+    必须在 import matplotlib **之前**调用 —— 所以整个程序里 matplotlib 都是
+    用到才导的（见 rapp/serve.py 里那个延迟 import）。
+    """
+    if _BUNDLE is None:
+        return
+    src = _BUNDLE / "matplotlib"
+    if not src.is_dir():
+        return
+    dst = _data_dir() / "matplotlib"
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in src.iterdir():
+            if f.is_file() and not (dst / f.name).exists():
+                shutil.copy2(f, dst)
+    except OSError:
+        return                          # 拷不了就算了，matplotlib 会自己重建
+    os.environ["MPLCONFIGDIR"] = str(dst)
+
+
+def _complain(text: str) -> None:
+    """
+    弹一个系统对话框。打包后的应用没有终端，出了事只能这么告诉用户。
+
+    Windows 走 user32 的 MessageBoxW（ctypes 是标准库，不多一个依赖），
+    macOS 走 osascript。都失败就算了 —— 日志里总归有。
+    """
+    try:
+        if os.name == "nt":
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(  # type: ignore[attr-defined]
+                0, text, "卡丁车遥测分析", 0x30)
+        elif sys.platform == "darwin" and Path("/usr/bin/osascript").exists():
+            safe = text.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(
+                ["/usr/bin/osascript", "-e",
+                 f'display dialog "{safe}" buttons {{"好"}} default button 1 '
+                 f'with title "卡丁车遥测分析" with icon caution giving up after 300'],
+                capture_output=True)
+    except Exception:                    # noqa: BLE001 — 报错本身不能再把程序带崩
+        pass
+
+
+_RECENT = _data_dir() / "recent.json"
+"""最近打开过的视频。放用户数据目录 —— 换台机器不该带着别人的路径，
+源码目录里也不该多出这么个文件。"""
 
 _VIDEO_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".mts", ".mpg"}
 
@@ -215,6 +316,27 @@ def choose_file() -> tuple[str | None, str]:
         return None, (f"系统对话框没能用起来（osascript 退出码 {req.returncode}）：{err}"
                       if err else
                       "系统对话框被中断了，再点一次试试；或者用下面的「浏览文件夹」。")
+
+    if os.name == "nt":
+        # Windows 没有 osascript，用 .NET 的 OpenFileDialog（PowerShell 一行调起）。
+        # 比多带一个依赖划算，而且拿到的就是真路径。
+        ps = (
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.OpenFileDialog; "
+            "$d.Filter = '视频|*.mp4;*.MP4;*.mov;*.MOV;*.m4v|所有文件|*.*'; "
+            "$d.Title = '选择 GoPro 拍的视频'; "
+            "if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName) }"
+        )
+        req = subprocess.run(
+            ["powershell", "-NoProfile", "-STA", "-Command", ps],
+            capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if req.returncode == 0 and req.stdout.strip():
+            return req.stdout.strip(), ""
+        if req.returncode == 0:
+            return None, ""              # 用户点了取消
+        err = " ".join((req.stderr or "").split())
+        return None, (f"系统文件框没能用起来：{err}" if err else
+                      "系统文件框被中断了，再点一次试试；或者用下面的「浏览文件夹」。")
 
     if shutil.which("zenity"):                       # Linux 的常见选择
         req = subprocess.run(
@@ -777,16 +899,22 @@ def _make_handler(app: _App) -> type[BaseHTTPRequestHandler]:
 
 def _fix_tool_path() -> None:
     """
-    把 Homebrew 那几个目录补进 PATH。
+    让 ffmpeg / ffprobe 找得到。分两层：
 
-    为什么需要：双击 .app 时，程序拿到的是系统默认 PATH
-    （/usr/bin:/bin:/usr/sbin:/sbin）—— 里面**没有 Homebrew**，因为那是 shell
-    的 rc 文件加的，而 .app 根本不经过 shell。结果就是 ffmpeg 明明装在
-    /opt/homebrew/bin，`shutil.which("ffmpeg")` 却找不到，整个程序直接罢工。
+    1. **打包自带的那份优先**。App 里已经带了一套静态 ffmpeg（放在
+       `_MEIPASS/bin`），用户机器上装没装、装的是几年前的版本都不影响。
+    2. 从源码跑时，把 Homebrew 几个目录补进 PATH。双击 .app 拿到的是系统默认
+       PATH（/usr/bin:/bin:/usr/sbin:/sbin），里面**没有 Homebrew** —— 那是 shell
+       的 rc 文件加的，而 .app 根本不经过 shell。不补就会误报"没装 ffmpeg"。
 
-    只在真的找不到时才补，不改动用户自己的环境；命令行启动时 PATH 本来就是
-    全的，这个函数会直接返回。
+    只在真的找不到时才补，不改动用户自己的环境。
     """
+    if _BUNDLE is not None:
+        bundled = _BUNDLE / "bin"
+        exe = "ffmpeg.exe" if os.name == "nt" else "ffmpeg"
+        if (bundled / exe).exists():
+            os.environ["PATH"] = str(bundled) + os.pathsep + os.environ.get("PATH", "")
+            return
     if shutil.which("ffmpeg") and shutil.which("ffprobe"):
         return
     parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
@@ -836,7 +964,7 @@ def _watch_first_page(app: "_App", url: str) -> None:
 
 
 # ==========================================================================
-def run(port: int = 8765, open_browser: bool = True) -> int:
+def run(port: int = 8765, open_browser: bool = True, log_path: Path | None = None) -> int:
     """起应用并阻塞到退出。返回进程退出码。"""
     _fix_tool_path()
     hud_args = dict(fps=15.0, crf=20, preset="veryfast", show_trace=True,
@@ -858,12 +986,14 @@ def run(port: int = 8765, open_browser: bool = True) -> int:
     threading.Thread(target=app.watchdog, args=(httpd,), daemon=True).start()
 
     print("\n" + "─" * 58)
-    print("  卡丁车遥测分析")
+    print("  卡丁车遥测分析" + ("（打包版）" if _FROZEN else ""))
     print(f"  浏览器地址：{url}")
     if open_browser:
         print("  （已经在浏览器里打开了）")
     print("  选视频 → 自动分析 → 跳看板；出片、改起点线都在看板里点。")
     print("  关掉浏览器页面程序会自己退出；也可以在这个窗口按 Ctrl+C。")
+    if log_path is not None:
+        print(f"  日志：{log_path}")
     print("─" * 58, flush=True)
     if open_browser:
         _open_browser(url)
@@ -880,16 +1010,27 @@ def run(port: int = 8765, open_browser: bool = True) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m rapp.app",
-        description="卡丁车遥测分析 —— 网页应用（双击 启动.command 也可以）")
+        prog="race-gopro" if _FROZEN else "python -m rapp.app",
+        description="卡丁车遥测分析 —— 网页应用")
     p.add_argument("--port", type=int, default=8765, help="本地服务端口，默认 8765")
     p.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    return run(port=args.port, open_browser=not args.no_open)
+    # 先把输出接到日志上：打包成无控制台的应用后，sys.stdout 可能是 None，
+    # 而后面随便一句 print（包括 argparse 报错）都会跟着炸。
+    log_path = _data_dir() / "app.log"
+    _redirect_output(log_path)
+    try:
+        _prepare_matplotlib()
+        args = build_parser().parse_args(argv)
+        return run(port=args.port, open_browser=not args.no_open, log_path=log_path)
+    except Exception as exc:                       # noqa: BLE001 — 打包后没人看得到 traceback
+        traceback.print_exc()
+        _complain(f"程序遇到问题，没能启动起来：\n{type(exc).__name__}: {exc}\n\n"
+                  f"详细日志：\n{log_path}")
+        return 1
 
 
 if __name__ == "__main__":

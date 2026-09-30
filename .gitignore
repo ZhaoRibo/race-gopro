@@ -30,3 +30,10 @@ __pycache__/
 
 # 双击启动那个 app 写的运行日志
 .race-gopro.log
+# 打包成独立应用的产物与中间文件
+# （packaging/ffmpeg/ 是下下来的静态 ffmpeg，200 MB，绝对不能进仓库）
+dist/
+build/
+packaging/ffmpeg/
+packaging/cache/
+packaging/matplotlib/

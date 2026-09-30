@@ -1,0 +1,3 @@
+# 打包成独立应用需要的额外依赖（普通使用不需要装）
+#   .venv/bin/pip install -r packaging/requirements.txt
+pyinstaller>=6.0

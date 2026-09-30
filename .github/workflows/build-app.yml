@@ -1,0 +1,88 @@
+name: 打包应用
+
+# 推一个 v* 标签（例如 v0.1.0）就自动出 macOS + Windows 两个包，并挂到 Release 上。
+# 也可以在 Actions 页面手动跑一次（产物在当次运行的 Artifacts 里，不发 Release）。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write          # 发 Release 要写权限
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14           # Apple Silicon
+            name: macos-arm64
+          - os: windows-latest
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r packaging/requirements.txt
+
+      - name: 打包
+        # build.py 会自己去下对应平台的静态 ffmpeg 并塞进包里
+        run: python packaging/build.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: race-gopro-${{ matrix.name }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    # 只有打标签才发 Release；手动跑就只留在 Artifacts 里
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          body: |
+            ## 下载哪个
+
+            | 你的电脑 | 下载 |
+            | --- | --- |
+            | Mac（M1/M2/M3/M4，2020 年之后的基本都是） | `race-gopro-macos-arm64.zip` |
+            | Windows 64 位 | `race-gopro-windows-x64.zip` |
+            | Intel 芯片的 Mac | 用不了这里的包，请[从源码运行](https://github.com/${{ github.repository }}#快速开始) |
+
+            解压后按里面的「使用说明」打开就行。**应用没有签名**，所以：
+
+            - **macOS**：第一次要右键点它 →「打开」→ 再点「打开」。之后就能直接双击了。
+            - **Windows**：如果出现蓝色的"Windows 已保护你的电脑"，点「更多信息」→「仍要运行」。
+
+            ffmpeg 已经打在包里了，不用另外装。
+
+            ## 它是干什么的
+
+            拿 GoPro 拍卡丁车/赛车，把 MP4 里那条遥测轨解出来，得到圈速、G 值、
+            走线对比、逐弯分析，还能生成带 HUD 的叠加视频。不需要外加传感器。
+
+            ## 怎么用
+
+            1. 打开应用，浏览器会自动弹出（没弹就手动开 <http://127.0.0.1:8765/>）
+            2. 点「选择视频文件…」挑一个 **GoPro 直接导出**的 MP4
+            3. 分析完自动跳到看板；结果写在视频旁边的 `<视频名>_out/` 里
+            4. 关掉浏览器页面，程序就退出了
+
+            注意：剪辑软件重新导出的视频会丢掉遥测数据，必须用相机原始文件。

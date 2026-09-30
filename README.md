@@ -36,6 +36,7 @@ RaceChrono、Telemetry Overlay 这些专业圈速软件读的也是这条流。
 
 - [这个工具能干什么](#这个工具能干什么)
 - [快速开始](#快速开始)
+  - [直接下载安装包（最省事）](#直接下载安装包最省事)
   - [不想碰命令行：双击 启动.app](#不想碰命令行双击-启动app)
   - [先确认环境](#先确认环境)
   - [四步跑起来](#四步跑起来)
@@ -62,11 +63,38 @@ RaceChrono、Telemetry Overlay 这些专业圈速软件读的也是这条流。
 - [自检](#自检)
 - [已知限制](#已知限制)
 - [常见问题](#常见问题)
-- [附录：内部原理](#附录内部原理)
-
+- [打包发 Release（维护者看）](#打包发-release维护者看)
 ---
 
 ## 快速开始
+
+### 直接下载安装包（最省事）
+
+到 [Releases](../../releases) 页面下载对应你系统的包，解压、双击就能用 ——
+**ffmpeg 已经打在包里**，不用另外装任何东西。
+
+| 你的电脑                                | 下载哪个                            |
+| --------------------------------------- | ----------------------------------- |
+| Mac（M1/M2/M3/M4，2020 年以后基本都是）  | `race-gopro-macos-arm64.zip`        |
+| Windows 64 位                           | `race-gopro-windows-x64.zip`        |
+| Intel 芯片的 Mac                        | 没有现成的包，用下面「从源码跑」那套 |
+
+包里就是应用本体 + 一份「使用说明」。解压后：
+
+- **macOS**：右键点「卡丁车遥测分析.app」→「打开」→ 再点一次「打开」。
+- **Windows**：双击 `race-gopro\race-gopro.exe`。
+
+**为什么要右键？** 应用没有签名（作者没买代码签名证书：苹果一年 99 美元）。
+未签名的应用从网上下下来会被系统当成可疑文件，右键「打开」是告诉系统
+"我知道它的来历"。**放行一次之后，以后就能直接双击了**。
+Windows 上如果弹蓝色的「Windows 已保护你的电脑」，点「更多信息」→「仍要运行」。
+
+打开之后：浏览器自动弹出（没弹就手动开 <http://127.0.0.1:8765/>）→
+点「选择视频文件…」选一个 GoPro 原始 MP4 → 等它跑完 → 自动跳到看板。
+结果写在视频旁边的 `<视频名>_out/`。关掉浏览器页面，程序自己退出。
+
+出问题要看日志：macOS 在 `~/Library/Application Support/race-gopro/app.log`，
+Windows 在 `%APPDATA%\race-gopro\app.log`。
 
 ### 不想碰命令行：双击 启动.app
 
@@ -573,11 +601,17 @@ HUD 叠加视频
 
 ```
 race-gopro/
-├── 启动.app/             双击就能用（macOS）：起本地服务 + 开浏览器
+├── 启动.app/             从源码跑时双击它（macOS）：起本地服务 + 开浏览器
 ├── analyze.py           命令行入口（分析都从这里进）
 ├── requirements.txt     运行依赖：numpy / scipy / matplotlib / pillow
 ├── README.md            就是这个文件
 ├── video/               你自己的素材（原始视频、官方圈速表、赛道图），不进仓库
+├── packaging/           把程序打成独立应用（发 Release 用）
+│   ├── build.py         一键：下 ffmpeg → PyInstaller → 压 zip
+│   ├── race-gopro.spec  PyInstaller 配置（怎么装包、Info.plist 写什么）
+│   ├── entry.py         打包用的入口脚本
+│   └── ffmpeg/          下载缓存的静态 ffmpeg（不进仓库，200 MB）
+├── .github/workflows/   CI：打 tag 自动出 mac + win 两个包并挂 Release
 ├── rapp/                算法全在这个包里
 │   ├── gpmf.py          GPMF 二进制解析（相当于 open()）
 │   ├── telemetry.py     统一数据层（相当于 read_csv() + 清洗）
@@ -773,6 +807,48 @@ macOS 对从压缩包解出来的 app 会拦一下：右键点它 → 打开 →
 那是旧版的 `启动.command` 被 **oh-my-zsh 的更新提示吞掉了路径开头的 `/`**
 （详见 [双击 启动.app](#不想碰命令行双击-启动app)）。现在改用 `启动.app` 了，
 不会再碰到。顺手把 oh-my-zsh 更新一下（终端里跑 `omz update`）也能消掉那个提示。
+
+**Q: 下载的安装包打开时说"来自身份不明的开发者"**
+
+应用没有签名（见 [直接下载安装包](#直接下载安装包最省事)）。macOS 上右键点它 →
+「打开」→ 再点一次「打开」；Windows 上点「更多信息」→「仍要运行」。
+放过一次之后就不会再问了。
+
+---
+
+## 打包发 Release（维护者看）
+
+普通使用者用不到这一节。想自己出一个"下载解压就能用"的包时看这里。
+
+```bash
+.venv/bin/pip install -r packaging/requirements.txt   # PyInstaller（只装一次）
+.venv/bin/python packaging/build.py
+```
+
+跑完在 `dist/` 下拿到 `race-gopro-macos-arm64.zip`（或 Windows 上的
+`race-gopro-windows-x64.zip`），传上去就能当 Release 资产。
+
+**Windows 的包只能在 Windows 上打** —— PyInstaller 不做交叉编译。所以正式发版走
+CI：推一个 `v*` 标签（例如 `v0.1.0`），`.github/workflows/build-app.yml` 会在
+macOS 和 Windows 上各跑一次，自动把两个包挂到 Release 上。也可以在 Actions 页面
+手动触发，那样就只留 Artifacts、不发 Release。
+
+几个不要改回旧做法的点：
+
+- **ffmpeg 是打进包里的**（`packaging/build.py` 自动下载各平台的静态构建）。
+  千万别用 Homebrew 装的那个：它是动态链接的，拷进包里换台机器就废了。
+  各平台来源：macOS arm64 用 osxexperts（文件名带版本号，所以是去首页现查的）、
+  Intel Mac 用 evermeet、Windows 用 gyan.dev。必须带 `libx264`，出片要靠它。
+- **matplotlib 的字体缓存也会预建好打进包**。不预建的话，用户第一次启动要花
+  十几秒扫系统字体，而这十几秒界面上什么都没有 —— 看起来就是"双击了没反应"。
+  配合 `rapp/serve.py` 里对 `charts` 的延迟导入（matplotlib 只在真要出图时才导），
+  打包版的启动时间是 **2 秒左右**。
+- **打包后没有控制台窗口**，所以程序会把自己的输出接到日志文件
+  （`rapp/app.py` 的 `_redirect_output`）。Windows 上 `sys.stdout` 是 `None`，
+  不接的话第一句 `print` 就会把程序打死。
+- **资源路径**：包里的 ffmpeg 在 `sys._MEIPASS/bin`，用户数据（最近打开过的视频、
+  日志）在系统的用户数据目录 —— `.app` 是只读的，不能往自己里面写。
+  这些分支都在 `rapp/app.py` 开头那几个函数里。
 
 ---
 

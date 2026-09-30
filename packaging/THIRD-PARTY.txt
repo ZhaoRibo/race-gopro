@@ -1,0 +1,17 @@
+本程序内置了 FFmpeg
+====================
+
+程序包里的 ffmpeg / ffprobe 是 FFmpeg 项目的独立构建版本，本程序用它来读取
+视频里的遥测轨（GPMF）、按时间取帧、以及生成带 HUD 的叠加视频。
+
+  FFmpeg 版权所有 (c) 2000-2026 the FFmpeg developers
+  许可证：GPL v3（所用构建启用了 --enable-gpl --enable-libx264 --enable-libx265）
+  项目主页：https://ffmpeg.org/
+  源码下载：https://ffmpeg.org/download.html
+  构建来源：macOS (arm64) 取自 osxexperts.net；Windows 取自 gyan.dev
+
+按 GPL 的要求，分发时随程序附上本声明。FFmpeg 的完整源码可以从上面的地址取得。
+
+关于许可证范围：本程序与 FFmpeg 是两个彼此独立的程序 —— 本程序只是**调用**
+ffmpeg 这个命令行程序（不链接它的库，也不把它嵌进自己的可执行文件），
+因此本程序自身不受 FFmpeg 的 GPL 约束。
