@@ -12,17 +12,18 @@
 Pillow 可以直接调用 FreeType 渲染系统字体，写出带抗锯齿的真字体文字，
 而且布局调整起来直观得多。
 
-性能：1080p 下单帧约 8~15 ms，20 分钟的视频（30fps）大约跑 5~8 分钟。
-    · 用 `--overlay-fps 12` 可以把 HUD 压到 12 帧/秒，速度再快一倍多
-      （计时器看起来仍然连续，因为小数点后三位本来也看不清）。
-    · 用 `--overlay-range 开始,结束` 只处理你真正关心的那几圈。
+性能（2704×2028 实测的量级）：编一帧约 51 ms，而画一帧 HUD 才约 3 ms ——
+**瓶颈是 x264 编码，不是画 HUD**，所以一秒素材大约要 3 秒机器时间。
+    · `--overlay-preset veryfast` 约快 40%，画质基本看不出差别
+    · `--overlay-range 开始,结束` 只处理你真正关心的那几圈，按比例省
+    · 调 `--overlay-fps` **基本不提速**：输出的帧率跟的是源视频，HUD 少刷几次
+      并不会让输出少编几帧
 
 HUD 布局（以 1080p 为基准，其它分辨率按高度等比缩放）
     左上：圈号 / 本圈计时 / 与最快圈的差距 / 最快圈
-    右上：当前速度
-    左下：纵向 G 指示条（向上绿 = 加速，向下红 = 刹车）
-    中下：G-G 圆盘（一个点表示当前横向+纵向 G）+ 横向 G 数值
-    右下：本圈速度曲线 + 最快圈参考线 + 当前位置游标
+    右上：本圈速度曲线 + 最快圈参考线 + 当前位置游标
+    左下：纵向 G 指示条（向上绿 = 加速，向下红 = 刹车）+ G-G 圆盘与横向 G 数值
+    右下：当前时速
 
 不做油门/刹车指示：GoPro 测不到油门开度，任何“油门/刹车”都只能是纵向 G
 的换算，而卡丁车漂移时纵向 G 里混着 -v·ω·sinβ 这一项（能到 ±0.8 g），
@@ -309,14 +310,16 @@ def render_hud_frame(
                font=fonts.get(px(26)), fill=_DIM)
 
     # ------------------------------------------------------------------
-    # 右上：速度
+    # 右下：时速
     # ------------------------------------------------------------------
+    # 用右对齐 + 底对齐（anchor="rb"）：数字位数变化（99 → 100）时往左长，
+    # 右边不会被挤得跳来跳去。
     spd = float(hud["speed"][k])
     if np.isfinite(spd):
-        d.text((W - px(240), px(30)), f"{spd * 3.6:.0f}",
-               font=fonts.get(px(172), mono=True), fill=_WHITE, anchor="ra")
-        d.text((W - px(48), px(198)), "km/h",
-               font=fonts.get(px(34)), fill=_DIM, anchor="ra")
+        d.text((W - px(48), H - px(150)), f"{spd * 3.6:.0f}",
+               font=fonts.get(px(172), mono=True), fill=_WHITE, anchor="rb")
+        d.text((W - px(48), H - px(62)), "km/h",
+               font=fonts.get(px(34)), fill=_DIM, anchor="rb")
 
     # ------------------------------------------------------------------
     # 左下：纵向 G 指示条
@@ -410,12 +413,12 @@ def render_hud_frame(
            fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ls")
 
     # ------------------------------------------------------------------
-    # 右下：本圈速度曲线 + 最快圈参考 + 当前位置游标
+    # 右上：本圈速度曲线 + 最快圈参考 + 当前位置游标
     # ------------------------------------------------------------------
     if show_trace and best is not None and best.speed is not None and 1 <= lap_no <= len(ls.laps):
         lap = ls.laps[lap_no - 1]
         box_w, box_h = px(760), px(196)
-        tb_x, tb_y = W - box_w - px(48), H - box_h - px(56)
+        tb_x, tb_y = W - box_w - px(48), px(40)
         base.alpha_composite(_rounded_panel((box_w, box_h), px(14), _PANEL), (tb_x, tb_y))
 
         grid, bs = best.grid, best.speed
