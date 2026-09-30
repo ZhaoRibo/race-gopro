@@ -103,6 +103,29 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .pickerbtns button:hover{color:var(--fg);border-color:#39414d;background:#1c2430;}
   .picker .hint{margin:9px 0 0;color:var(--dim);font-size:11.5px;line-height:1.6;}
 
+  /* 「单圈 HUD 视频」区块 */
+  .hudrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;}
+  .hudrow select,.hudrow button{background:var(--panel);color:var(--fg);
+        border:1px solid var(--line);border-radius:7px;padding:6px 11px;
+        font-size:12.5px;font-family:inherit;}
+  .hudrow select{cursor:pointer;min-width:190px;}
+  .hudrow button{cursor:pointer;}
+  .hudrow button:hover{background:#1c2430;border-color:#39414d;}
+  .hudrow button.primary{background:#1f6feb;border-color:#2a7bf0;color:#fff;font-weight:600;}
+  .hudrow button.primary:hover{background:#2a7bf0;border-color:#3b86f5;}
+  .hudrow button:disabled{opacity:.45;cursor:not-allowed;}
+  .hudrange{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;}
+  .hudbar{height:6px;background:#232a33;border-radius:4px;overflow:hidden;margin-top:11px;}
+  .hudbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s;}
+  .hudmsg{margin:9px 0 0;font-size:12.5px;color:var(--dim);line-height:1.75;}
+  .hudmsg b{color:var(--fg);}
+  .hudmsg .ok{color:#3fb950;}
+  .hudmsg .bad{color:#f0c674;}
+  .hudmsg a{color:var(--accent);}
+  button.mini{background:transparent;border:1px solid var(--line);color:var(--dim);
+        border-radius:6px;padding:2px 8px;font-size:11.5px;font-family:inherit;cursor:pointer;}
+  button.mini:hover{color:var(--fg);border-color:#39414d;background:#1c2430;}
+
   /* “其他文件”区块：指向 charts/ 与 tables/ 里的产物 */
   section h3{margin:15px 0 7px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.4px;}
   section h3:first-of-type{margin-top:4px;}
@@ -140,6 +163,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
       <button type="button" data-act="top5">最快 5 圈</button>
     </div>
     <p class="hint">勾选会同时作用到下面所有「每圈一条线」的图表：速度—距离曲线、时间差、每圈走线、每圈走线偏差。<b>点任意一张图的图例效果完全一样</b>，两边是同步的（圈速分布、G-G 图、赛道俯视图不受影响 —— 它们不是按圈拆的）。</p>
+  </section>
+
+  <section id="hudSec">
+    <h2>单圈 HUD 视频</h2>
+    <p class="hint">选一圈，点按钮就生成这一圈的 HUD 叠加视频，自动在本圈前后各留 <b>__PAD__</b> 秒（过线那一瞬间才不会被切掉）。<b>只出片</b>，不会重跑分析、也不会重新生成图表和看板。</p>
+    <div class="hudrow">
+      <select id="hudLap"></select>
+      <button class="primary" id="hudGo" type="button">生成 HUD 视频</button>
+      <button id="hudCancel" type="button" hidden>取消</button>
+      <span class="hudrange" id="hudRange"></span>
+    </div>
+    <div class="hudbar" id="hudBar" hidden><i id="hudBarFill"></i></div>
+    <div class="hudmsg" id="hudMsg"></div>
   </section>
 
   <section>
@@ -206,6 +242,170 @@ const SKIPPED = DATA.laps.filter(l => !l.valid).map(l => "#" + l.index).join(", 
 const SUFFIX = SKIPPED ? "（已排除非正常圈 " + SKIPPED + "）" : "";
 const BEST = LAPS.length ? LAPS.reduce((a,b)=>b.duration_s<a.duration_s?b:a) : null;
 const isBest = l => BEST && l.index === BEST.index;
+
+// ---------- 单圈 HUD 视频 ----------
+// 这一页是静态 HTML，浏览器不许它调 ffmpeg，所以真正的出片由 `analyze.py --serve`
+// 挂起来的本地服务干（见 rapp/serve.py）。服务不在时按钮禁用，并告诉你该怎么起。
+(function hudMaker(){
+  const sel = document.getElementById("hudLap");
+  if (!sel) return;
+  const go = document.getElementById("hudGo");
+  const cancelBtn = document.getElementById("hudCancel");
+  const bar = document.getElementById("hudBar");
+  const fill = document.getElementById("hudBarFill");
+  const msg = document.getElementById("hudMsg");
+  const rangeEl = document.getElementById("hudRange");
+
+  const PAD = DATA.hud.pad;
+  // 出片范围 = 本圈起止各留 PAD 秒，再截到时长以内。
+  // 规则和 rapp/serve.py 的 lap_range() 必须一致，不然页面显示的和实际切的会不一样。
+  const RANGE = {};
+  DATA.laps.forEach(l => {
+    RANGE[l.index] = [Math.max(0, l.t_start - PAD),
+                      Math.min(DATA.hud.duration, l.t_end + PAD)];
+  });
+
+  DATA.laps.forEach(l => {
+    const o = document.createElement("option");
+    o.value = String(l.index);
+    o.textContent = "第 " + l.index + " 圈 · " + l.time + (l.valid ? "" : "（非正常圈）");
+    sel.appendChild(o);
+  });
+  if (BEST) sel.value = String(BEST.index);
+
+  let server = null;     // ping 通了才有值
+  let job = null;        // 正在跑的任务号
+  let timer = null;
+
+  const say = html => { msg.innerHTML = html; };
+
+  function showRange() {
+    const r = RANGE[sel.value];
+    rangeEl.textContent = r ? ("出片范围 " + r[0].toFixed(1) + " → " + r[1].toFixed(1)
+                               + " s（含前后 " + PAD + " 秒）") : "";
+  }
+
+  function setBusy(on) {
+    go.disabled = on || !server;
+    sel.disabled = on;
+    cancelBtn.hidden = !on;
+    if (on) bar.hidden = false;
+  }
+
+  function poll() {
+    if (!job) return;
+    fetch("api/hud?id=" + job, {cache: "no-store"})
+      .then(r => r.json())
+      .then(j => {
+        if (j.state === "running") {
+          const pct = j.pct * 100;
+          fill.style.width = pct.toFixed(0) + "%";
+          say("正在生成第 " + j.lap + " 圈… <b>" + pct.toFixed(0) + "%</b>"
+              + "（已用 " + j.elapsed.toFixed(0) + " s）<br>"
+              + "编码用的是源视频分辨率，一圈大概要几分钟，页面别关就行。");
+          timer = setTimeout(poll, 700);
+          return;
+        }
+        job = null;
+        setBusy(false);
+        if (j.state === "done") {
+          fill.style.width = "100%";
+          say('<span class="ok">✓ 第 ' + j.lap + " 圈生成好了</span>，用时 "
+              + j.elapsed.toFixed(0) + " s。<br>"
+              + '<a href="' + j.url + '" target="_blank">▶ 点这里播放</a><br>'
+              + "文件：<b>" + j.path + "</b>");
+        } else if (j.state === "cancelled") {
+          bar.hidden = true;
+          say("已取消，半成品已经删掉了。");
+        } else {
+          bar.hidden = true;
+          say('<span class="bad">生成失败：</span>' + j.msg);
+        }
+      })
+      .catch(() => {
+        job = null;
+        setBusy(false);
+        bar.hidden = true;
+        say('<span class="bad">和本地服务失去联系了。</span>检查终端里的服务是不是被关掉了。');
+      });
+  }
+
+  function start() {
+    if (!server) return;
+    if (job) return;
+    const lap = parseInt(sel.value, 10);
+    setBusy(true);
+    fill.style.width = "0%";
+    say("正在准备第 " + lap + " 圈…");
+    fetch("api/hud", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({lap: lap})
+    })
+      .then(r => r.json())
+      .then(j => {
+        if (j.error) {
+          setBusy(false);
+          bar.hidden = true;
+          say('<span class="bad">' + j.error + "</span>");
+          return;
+        }
+        job = j.id;
+        poll();
+      })
+      .catch(() => {
+        setBusy(false);
+        bar.hidden = true;
+        say('<span class="bad">请求发不出去。</span>确认本地服务还在跑。');
+      });
+  }
+
+  sel.addEventListener("change", showRange);
+  go.addEventListener("click", start);
+  cancelBtn.addEventListener("click", () => {
+    if (!job) return;
+    say("正在取消…");
+    fetch("api/hud/cancel", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({id: job})
+    }).catch(() => {});
+  });
+  // 逐圈明细表里的「出片」按钮：走事件委托，跟表格的渲染顺序无关
+  document.addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-hudlap]");
+    if (!b) return;
+    sel.value = b.dataset.hudlap;
+    showRange();
+    if (!server) {
+      say('<span class="bad">还没连上本地服务</span>，先按下面的办法把服务起起来。');
+      return;
+    }
+    start();
+  });
+
+  // ---- 探活 ----
+  fetch("api/ping", {cache: "no-store"})
+    .then(r => r.json())
+    .then(info => {
+      server = info;
+      setBusy(false);
+      say("本地服务已连上（" + (info.source || "源视频") + "）。"
+          + "选好圈点「生成 HUD 视频」就行。");
+    })
+    .catch(() => {
+      server = null;
+      setBusy(false);
+      go.disabled = true;
+      say('<span class="bad">这一页不是从本地服务打开的，所以出片按钮用不了。</span><br>'
+          + "在终端里带 <b>--serve</b> 跑一次（分析会重跑，几秒钟）：<br>"
+          + "<b>.venv/bin/python analyze.py 你的视频.MP4 --serve</b><br>"
+          + "然后用 <b>http://127.0.0.1:8765/</b> 打开看板。"
+          + "双击 html 文件不行 —— 浏览器不允许网页自己调用 ffmpeg。");
+    });
+
+  showRange();
+})();
 
 if (typeof Chart === "undefined") {
   document.getElementById("nodata").innerHTML =
@@ -622,7 +822,7 @@ if (LINES.length) {
 
   // ---- 逐圈明细表 ----
   const lHead = ["圈号","圈时","Δ最快"].concat(DATA.sector_labels)
-    .concat(["里程","极速","最慢","平均速","峰值横G","峰值刹G","峰值加速","速度增量","加速占比"]);
+    .concat(["里程","极速","最慢","平均速","峰值横G","峰值刹G","峰值加速","速度增量","加速占比","出片"]);
   let h2 = "<thead><tr>" + lHead.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
   for (const l of DATA.laps) {
     const delta = l.duration_s - BEST.duration_s;
@@ -639,6 +839,7 @@ if (LINES.length) {
     row += td(l.peak_lat_g.toFixed(2), cls) + td(l.peak_brake_g.toFixed(2), cls);
     row += td(l.peak_accel_g.toFixed(2), cls) + td(l.speed_gain_ms.toFixed(0), cls);
     row += td(l.accel_time_pct.toFixed(0) + "%", cls);
+    row += '<td><button type="button" class="mini" data-hudlap="' + l.index + '">出片</button></td>';
     h2 += row + "</tr>";
   }
   document.getElementById("tLap").innerHTML = h2 + "</tbody>";
@@ -786,12 +987,16 @@ def _check_inline_js(html: str) -> str | None:
         Path(tmp).unlink(missing_ok=True)
 
 
-def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, points_per_lap: int = 260) -> Path:
+def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16,
+          points_per_lap: int = 260, hud_pad: float = 5.0) -> Path:
     """
     生成单文件 HTML 看板。
 
     keep_laps / points_per_lap 用来控制文件体积 —— 圈数太多或采样太密会让
     HTML 变得很大，浏览器渲染也会卡。默认值对 10~20 分钟的练习刚好。
+
+    hud_pad 是「单圈 HUD 视频」在每圈前后各留的秒数，只影响页面上显示的范围，
+    实际出片时以 serve.py 的值为准（两边同一个常量）。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -813,6 +1018,8 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
             "valid": lap.valid,
             "duration_s": round(lap.duration, 3),
             "time": laps.format_lap_time(lap.duration),
+            "t_start": round(lap.t_start, 3),
+            "t_end": round(lap.t_end, 3),
             "sectors_s": [round(s, 3) for s in lap.sectors],
             "length_m": round(lap.length, 1),
             "max_speed_kmh": round(lap.max_speed * 3.6, 1),
@@ -898,6 +1105,13 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
         "grid": [round(float(v), 1) for v in grid],
         "laps": lap_json,
         "sector_labels": [f"分段{i + 1}" for i in range(ls.sector_count)],
+        # 「单圈 HUD 视频」要用：每圈起止时刻（t_start/t_end）和视频总长，
+        # 页面靠它们算出片范围。时长用遥测的，因为出片也是按遥测时间轴切的。
+        "hud": {
+            "pad": hud_pad,
+            "duration": round(ls.telemetry.duration, 3) if ls.telemetry is not None
+            else round(max((l.t_end for l in ls.laps), default=0.0), 3),
+        },
         "corner_bands": [[round(c.d_start, 1), round(c.d_end, 1)] for c in sa.corners],
         # 每圈走线图的等比例坐标窗口：x、y 取同一个半径，容器再做正方形，
         # 两者同时成立 1 米横向和 1 米纵向才占同样多的像素（Chart.js 没有内置等比例轴）
@@ -933,6 +1147,7 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
     html = (
         _TEMPLATE
         .replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        .replace("__PAD__", f"{hud_pad:g}")
         .replace("__CARDS__", _cards(sa))
         .replace("__TITLE__", f"卡丁车遥测分析 — {t.source if t else ''}")
         .replace("__SOURCE__", t.source if t else "")

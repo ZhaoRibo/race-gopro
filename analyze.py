@@ -32,7 +32,18 @@ import argparse
 import sys
 from pathlib import Path
 
-from rapp import analysis, charts, dashboard, demo, gpmf, laps, overlay, report, telemetry
+from rapp import (
+    analysis,
+    charts,
+    dashboard,
+    demo,
+    gpmf,
+    laps,
+    overlay,
+    report,
+    serve,
+    telemetry,
+)
 
 
 def _parse_range(text: str) -> tuple[float, float]:
@@ -132,6 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overlay-crf", type=int, default=20, help="HUD 视频画质，越小越清晰（默认 20）")
     p.add_argument("--overlay-preset", default="medium", help="x264 预设，默认 medium")
     p.add_argument("--no-trace", action="store_true", help="HUD 里不画速度曲线小图")
+
+    p.add_argument("--serve", action="store_true",
+                   help="跑完不退出，把看板挂到本地端口上：这样在看板里能选中某一圈"
+                        "一键生成 HUD 视频（浏览器的沙箱里调不了 ffmpeg，必须有这个服务）")
+    p.add_argument("--serve-port", type=int, default=8765, metavar="N",
+                   help="本地服务端口，默认 8765")
 
     p.add_argument("--list-streams", action="store_true", help="只列出视频里的遥测流，不做分析")
     p.add_argument("--list-gates", action="store_true",
@@ -325,7 +342,8 @@ def main(argv: list[str] | None = None) -> int:
 
     html: Path | None = None
     if not args.no_dashboard:
-        html = dashboard.build(sa, outdir / "dashboard.html")
+        # hud_pad 只是给页面显示用的，实际出片以 serve.py 的常量为准
+        html = dashboard.build(sa, outdir / "dashboard.html", hud_pad=serve.PAD_SECONDS)
 
     # ------------------------------------------------------------------
     # HUD 叠加视频
@@ -367,6 +385,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  tables/          {len(tables_written)} 个数据文件（Excel / pandas 可直接打开）")
     if out_video is not None:
         print(f"  {out_video.name:<17}带 HUD 的叠加视频")
+
+    # ------------------------------------------------------------------
+    # 本地服务（可选，最后跑）：让看板上的「生成 HUD 视频」按钮能用
+    # ------------------------------------------------------------------
+    if args.serve:
+        if video_path is None:
+            print("\n--serve 需要源视频（--demo 没有可叠加的视频，加 --overlay 也不行）。",
+                  file=sys.stderr)
+            return 2
+        if html is None:
+            print("\n--serve 需要看板文件，但加了 --no-dashboard。去掉它再试。", file=sys.stderr)
+            return 2
+        return serve.run(
+            sa, outdir, video_path,
+            port=args.serve_port,
+            fps=args.overlay_fps,
+            crf=args.overlay_crf,
+            preset=args.overlay_preset,
+            show_trace=not args.no_trace,
+        )
+
     return 0
 
 

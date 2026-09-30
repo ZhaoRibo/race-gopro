@@ -35,6 +35,7 @@ import json
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -453,6 +454,10 @@ def render_hud_frame(
 
 
 # ==========================================================================
+class Cancelled(RuntimeError):
+    """HUD 生成被中途取消（半成品已经删掉）。"""
+
+
 def burn(
     video: str | Path,
     sa: ana.SessionAnalysis,
@@ -464,8 +469,18 @@ def burn(
     preset: str = "medium",
     show_trace: bool = True,
     verbose: bool = True,
+    progress: Callable[[float], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Path:
-    """把 HUD 烧进视频。"""
+    """
+    把 HUD 烧进视频。
+
+    progress
+        每写完一批帧回调一次，参数是 0~1 的完成比例。
+        本地服务（serve.py）用它驱动网页上的进度条。
+    should_stop
+        返回 True 就中断，并把已经写了半截的文件删掉。
+    """
     video = Path(video)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -511,21 +526,42 @@ def burn(
 
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=None)
     assert proc.stdin is not None
+    # 每 2% 回调一次就够了；每帧都回调反而会让进度条一直在抖
+    step = max(1, n_frames // 50)
+    cancelled = False
     try:
         for k in range(n_frames):
+            if should_stop is not None and should_stop():
+                cancelled = True
+                break
             frame = render_hud_frame(k, hud, sa, W, H, fonts, show_trace=show_trace,
                                      g_lat_max=g_lat_max, g_long_max=g_long_max)
             proc.stdin.write(frame.tobytes())
+            if progress is not None and k % step == 0:
+                progress(k / n_frames)
             if verbose and k % max(1, n_frames // 10) == 0:
                 pct = k / n_frames * 100
                 sys.stderr.write(f"\r  渲染进度 {pct:5.1f}%")
                 sys.stderr.flush()
+        if cancelled:
+            proc.kill()
     except BrokenPipeError:
         pass
     finally:
-        if proc.stdin:
-            proc.stdin.close()
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
         ret = proc.wait()
+
+    if cancelled:
+        # 删掉半截文件：留着的话用户下次点会以为生成成功了
+        out_path.unlink(missing_ok=True)
+        raise Cancelled("HUD 生成已取消。")
+
+    if progress is not None:
+        progress(1.0)
     if verbose:
         sys.stderr.write("\r  渲染进度 100.0%\n")
 
@@ -534,4 +570,4 @@ def burn(
     return out_path
 
 
-__all__ = ["burn", "render_hud_frame", "video_info"]
+__all__ = ["Cancelled", "burn", "render_hud_frame", "video_info"]
