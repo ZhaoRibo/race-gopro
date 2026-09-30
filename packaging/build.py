@@ -40,7 +40,21 @@ PKG = ROOT / "packaging"
 FFMPEG_DIR = PKG / "ffmpeg"
 DIST = ROOT / "dist"
 
-VERSION = "0.1.0"
+# Windows 上的 stdout 不是 UTF-8，而是本地代码页（英文系统就是 cp1252）。
+# 而下面每一句 print 都带中文，于是第一句就炸：
+#
+#     UnicodeEncodeError: 'charmap' codec can't encode characters in position 0-2
+#
+# macOS / Linux 天生 UTF-8，所以本地怎么跑都绿的 —— 第一次发 Release 时
+# Windows 任务就是这么挂的。这里强制 UTF-8；errors="replace" 兜底，
+# 就算真有存不下的字符（比如某些终端），也只是显示成问号，不至于把构建掀了。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):      # 流被换成不支持重配置的（比如某些管道）
+        pass
+
+VERSION = "0.1.1"
 """版本号。改这里就够了（会写进 macOS 的 Info.plist 和产物文件名）。"""
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -89,15 +103,21 @@ def _download(url: str, dest: Path) -> Path:
     return dest
 
 
-def _extract_from_zip(archive: Path, wanted: dict[str, Path]) -> None:
+def _extract_from_zip(archive: Path, wanted: dict[str, Path],
+                      *, exe: bool | None = None) -> None:
     """
     从 zip 里挑出 ffmpeg / ffprobe。
 
     不写死压缩包内部的路径：各家的目录结构不一样
     （有的在根目录、有的在 `ffmpeg-7.0/bin/` 下面），
     所以按**文件名**找，找到就停 —— 版本号变了也不会挂。
+
+    `exe` 默认跟着平台走（Windows 上找 .exe）。做成参数只是为了能在不是
+    Windows 的机器上把这条分支测一遍 —— 见给 CI 排错时留下的教训。
     """
-    want = {k + ("." + "exe" if os.name == "nt" else ""): v for k, v in wanted.items()}
+    if exe is None:
+        exe = os.name == "nt"
+    want = {k + (".exe" if exe else ""): v for k, v in wanted.items()}
     remaining = dict(want)
     with zipfile.ZipFile(archive) as zf:
         for info in zf.infolist():

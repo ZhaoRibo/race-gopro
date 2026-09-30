@@ -833,6 +833,25 @@ CI：推一个 `v*` 标签（例如 `v0.1.0`），`.github/workflows/build-app.y
 macOS 和 Windows 上各跑一次，自动把两个包挂到 Release 上。也可以在 Actions 页面
 手动触发，那样就只留 Artifacts、不发 Release。
 
+发版的完整步骤（版本号只有一处要改：`packaging/build.py` 里的 `VERSION`）：
+
+```bash
+# 1. 改 packaging/build.py 里的 VERSION
+# 2. 提交
+git add -A && git commit -m "发 v0.1.1"
+# 3. 打标签 —— 标签名和 VERSION 保持一致，出问题好排查
+git tag -a v0.1.1 -m "v0.1.1"
+# 4. 分支和标签一起推 —— 只推分支不会触发打包
+git push origin main v0.1.1
+```
+
+推完去 Actions 看进度（两个平台加起来 5～15 分钟）。**两个 job 都绿了才会出
+Release**：任意一个失败，`release` 那一步会被直接跳过，Release 就不会出现 ——
+所以别看到"有运行记录"就以为成了。
+
+CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展开失败的那一步。注意
+**日志要登录才能看**，公开仓库也一样，所以命令行里 curl 那个日志接口只会返回 403。
+
 几个不要改回旧做法的点：
 
 - **ffmpeg 是打进包里的**（`packaging/build.py` 自动下载各平台的静态构建）。
@@ -846,6 +865,12 @@ macOS 和 Windows 上各跑一次，自动把两个包挂到 Release 上。也�
 - **打包后没有控制台窗口**，所以程序会把自己的输出接到日志文件
   （`rapp/app.py` 的 `_redirect_output`）。Windows 上 `sys.stdout` 是 `None`，
   不接的话第一句 `print` 就会把程序打死。
+- **脚本里可以放心写中文，但得保证 stdout 是 UTF-8**。Windows 的 `stdout` 默认按
+  本地代码页编码（英文系统是 cp1252），`packaging/build.py` 第一句
+  `print("平台：…")` 就会 `UnicodeEncodeError` 把构建打死 —— 第一次发版就是这
+  么挂在 Windows 上的（mac 天生 UTF-8，本地怎么测都是绿的）。两道保险都别拆：
+  `build.py` / `analyze.py` 开头的 `sys.stdout.reconfigure(encoding="utf-8")`，
+  以及 workflow 里的 `PYTHONUTF8: "1"`（它连子进程一起管）。
 - **资源路径**：包里的 ffmpeg 在 `sys._MEIPASS/bin`，用户数据（最近打开过的视频、
   日志）在系统的用户数据目录 —— `.app` 是只读的，不能往自己里面写。
   这些分支都在 `rapp/app.py` 开头那几个函数里。

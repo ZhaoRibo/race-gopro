@@ -46,6 +46,16 @@ from rapp import (
     telemetry,
 )
 
+# Windows 的 stdout 默认不是 UTF-8，而是本地代码页（英文系统就是 cp1252），
+# 而本程序满屏中文 —— 在 Windows 命令行里直接跑，第一句进度提示就会
+# UnicodeEncodeError 崩掉。强制 UTF-8；errors="replace" 兜底，
+# 宁可变几个问号，也不要因为一个字符把整场分析中断了。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):      # 流被换成不支持重配置的（比如某些管道）
+        pass
+
 
 def _parse_range(text: str) -> tuple[float, float]:
     try:

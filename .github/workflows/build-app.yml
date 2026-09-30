@@ -10,6 +10,12 @@ on:
 permissions:
   contents: write          # 发 Release 要写权限
 
+# Windows 上 Python 默认按本地代码页（cp1252）编码 stdout，脚本里满是中文的
+# print 第一句就会 UnicodeEncodeError。PYTHONUTF8 会把整个 Python 进程（包括
+# 它拉起来的子进程、PyInstaller）都切到 UTF-8 —— 比在代码里逐处加 encoding 稳。
+env:
+  PYTHONUTF8: "1"
+
 jobs:
   build:
     strategy:
