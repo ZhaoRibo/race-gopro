@@ -283,12 +283,22 @@ def render_hud_frame(
     a_long = float(hud["a_long"][k])
 
     # ------------------------------------------------------------------
+    # 顶部两个卡片的公共几何
+    # ------------------------------------------------------------------
+    # 左右边距和中间空当都取同一个常数：这样左上计时卡和右上曲线卡**宽度完全
+    # 相等**，外沿也左右对称。右下时速、左下那排仪表也都统一用这个 M 对齐。
+    M = px(60)                            # 画面四周统一的外边距
+    top_gap = px(60)                      # 两个卡片之间的空当
+    top_w = (W - 2 * M - top_gap) // 2    # 两个卡片各自等宽
+    top_y = px(32)
+
+    # ------------------------------------------------------------------
     # 左上：圈号 / 本圈计时 / 与最快圈的差距
     # ------------------------------------------------------------------
-    panel_w, panel_h = px(566), px(238)
-    base.alpha_composite(_rounded_panel((panel_w, panel_h), px(18), _PANEL), (px(32), px(32)))
+    panel_w, panel_h = top_w, px(238)
+    base.alpha_composite(_rounded_panel((panel_w, panel_h), px(18), _PANEL), (M, top_y))
 
-    x0, y0 = px(60), px(52)
+    x0, y0 = M + px(28), top_y + px(20)
     if lap_no > 0:
         d.text((x0, y0), "LAP", font=fonts.get(px(30), mono=True), fill=_DIM)
         d.text((x0 + px(90), y0), f"{lap_no} / {total}", font=fonts.get(px(30), mono=True), fill=_WHITE)
@@ -316,9 +326,9 @@ def render_hud_frame(
     # 右边不会被挤得跳来跳去。
     spd = float(hud["speed"][k])
     if np.isfinite(spd):
-        d.text((W - px(48), H - px(150)), f"{spd * 3.6:.0f}",
+        d.text((W - M, H - px(150)), f"{spd * 3.6:.0f}",
                font=fonts.get(px(172), mono=True), fill=_WHITE, anchor="rb")
-        d.text((W - px(48), H - px(62)), "km/h",
+        d.text((W - M, H - px(62)), "km/h",
                font=fonts.get(px(34)), fill=_DIM, anchor="rb")
 
     # ------------------------------------------------------------------
@@ -330,7 +340,7 @@ def render_hud_frame(
     cx, cy = px(430), H - px(196)
     bar_w = px(60)
     bar_h = 2 * r                              # 与圆盘直径等高
-    bx = px(60)
+    bx = M                                     # 和顶部卡片的左边线对齐
     by = cy - r                                # 条的上下与圆盘对齐
     mid = by + bar_h / 2
     half = bar_h / 2
@@ -415,22 +425,19 @@ def render_hud_frame(
     # 「横向」用中文字体、数字用等宽字体分开画：等宽字体不含中文字形，
     # 混在一串里会把中文变成豆腐块；而数字用等宽才能在跳动时不左右飘。
     y_lab = lab_y
-    txt_lat = "横向"
-    txt_num = f" {a_lat:+.2f} g" if np.isfinite(a_lat) else " -- g"
-    w_lat = d.textlength(txt_lat, font=lab_sans)
-    w_num = d.textlength(txt_num, font=lab_num)
-    x_lab = cx - (w_lat + w_num) / 2
-    d.text((x_lab, y_lab), txt_lat, font=lab_sans, fill=_DIM, anchor="ls")
-    d.text((x_lab + w_lat, y_lab), txt_num, font=lab_num,
-           fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ls")
+    # 和纵向 G 那边一个排法：标签在上、数值在下，两行都居中对着圆盘
+    d.text((cx, y_lab), "横向", font=lab_sans, fill=_DIM, anchor="ms")
+    d.text((cx, y_lab + px(46)),
+           f"{a_lat:+.2f} g" if np.isfinite(a_lat) else "-- g",
+           font=lab_num, fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ms")
 
     # ------------------------------------------------------------------
     # 右上：本圈速度曲线 + 最快圈参考 + 当前位置游标
     # ------------------------------------------------------------------
     if show_trace and best is not None and best.speed is not None and 1 <= lap_no <= len(ls.laps):
         lap = ls.laps[lap_no - 1]
-        box_w, box_h = px(760), px(196)
-        tb_x, tb_y = W - box_w - px(48), px(40)
+        box_w, box_h = top_w, px(196)
+        tb_x, tb_y = W - M - box_w, top_y
         base.alpha_composite(_rounded_panel((box_w, box_h), px(14), _PANEL), (tb_x, tb_y))
 
         grid, bs = best.grid, best.speed
