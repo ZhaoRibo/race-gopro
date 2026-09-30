@@ -168,25 +168,30 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <!-- 赛道俯视图放在最前面：先定下计时线位置，再去选「显示哪几圈」才有意义 -->
   <section>
     <h2>赛道俯视图</h2>
-    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>用下面的滑动条找到车压过发车线的那一瞬间，看画面确认，再点「用这一帧当起点线」</b> —— 整场会重新切圈，圈速/图表/看板一起刷新。</p>
+    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>想换起点线就点下面的「选择起点线…」</b>——拖到车压过发车线的那一瞬间，看画面确认，再点「用这一帧当起点线」，整场会重新切圈。不改的话它是收着的，不占地方。</p>
     <div class="chartbox wide-square"><canvas id="cMap"></canvas></div>
 
-    <div class="gateslider">
-      <label for="gateT">起点线在视频的第</label>
-      <input type="range" id="gateT" min="0" max="0" step="0.01" value="0" disabled>
-      <span class="gaterange" id="gateTime">—</span>
-      <button class="mini" id="gatePrev" type="button" title="上一帧（←）">‹ 一帧</button>
-      <button class="mini" id="gateNext" type="button" title="下一帧（→）">一帧 ›</button>
-    </div>
-    <div class="gateview">
-      <img id="gateShot" alt="起点线所在那一帧的画面">
-      <p id="gateShotHint">拖动滑动条，或用鼠标点一下滑动条后按 ← → 逐帧微调（按住 Shift 是 1 秒），这里会显示那一瞬间的画面。</p>
+    <div class="gatebar">
+      <button id="gateToggle" type="button" aria-expanded="false" aria-controls="gateTool" disabled>选择起点线…</button>
+      <span class="gaterange" id="gateMsg"></span>
     </div>
 
-    <div class="gatebar">
-      <span class="gaterange" id="gateMsg"></span>
-      <button class="primary" id="gateApply" type="button" disabled>用这一帧当起点线</button>
-      <button id="gateReset" type="button">恢复自动</button>
+    <div id="gateTool" hidden>
+      <div class="gateslider">
+        <label for="gateT">起点线在视频的第</label>
+        <input type="range" id="gateT" min="0" max="0" step="0.01" value="0" disabled>
+        <span class="gaterange" id="gateTime">—</span>
+        <button class="mini" id="gatePrev" type="button" title="上一帧（←）">‹ 一帧</button>
+        <button class="mini" id="gateNext" type="button" title="下一帧（→）">一帧 ›</button>
+      </div>
+      <div class="gateview">
+        <img id="gateShot" alt="起点线所在那一帧的画面">
+        <p id="gateShotHint">拖动滑动条，或用鼠标点一下滑动条后按 ← → 逐帧微调（按住 Shift 是 1 秒），这里会显示那一瞬间的画面。</p>
+      </div>
+      <div class="gatebar">
+        <button class="primary" id="gateApply" type="button" disabled>用这一帧当起点线</button>
+        <button id="gateReset" type="button">恢复自动</button>
+      </div>
     </div>
   </section>
 
@@ -765,6 +770,8 @@ new Chart(document.getElementById("cMap"), {
     label: "候选计时线",
     type: "line",
     data: [],
+    // 还没选位置之前它是空的，别在图例里占一个名字（选了之后 render() 会打开）
+    showInLegend: false,
     borderColor: "#22d3ee", borderWidth: 3, pointRadius: 0, fill: false
   }]},
   options: {
@@ -790,8 +797,13 @@ new Chart(document.getElementById("cMap"), {
 // 看一眼就知道车有没有压到线，而这恰恰是"起点线"的定义。
 // 位置不用前端自己估：时间交给服务端反查（rapp/laps.py 的 gate_by_time），
 // 它会吸附到最近的遥测采样点、用车的实际走向定过线方向，再把结果发回来。
+//
+// 平时这块是收起的（绝大多数人不会去动起点线，没必要占着半屏）；点「选择起点线…」
+// 才展开，重算完自动收起 —— 重算会刷新页面，而刷新后本来就是收起状态。
 (function gateMaker(){
   const msg = document.getElementById("gateMsg");
+  const toggleBtn = document.getElementById("gateToggle");
+  const tool = document.getElementById("gateTool");
   const slider = document.getElementById("gateT");
   const timeEl = document.getElementById("gateTime");
   const shot = document.getElementById("gateShot");
@@ -813,6 +825,7 @@ new Chart(document.getElementById("cMap"), {
   let want = null;        // 滑动条最后停在哪一刻
   let inflight = false;   // 有一次取画面还在路上
   let busy = false;       // 正在重算
+  let open = false;       // 工具面板展开着吗
 
   const say = html => { msg.innerHTML = html; };
   const fmt = t => {
@@ -823,6 +836,20 @@ new Chart(document.getElementById("cMap"), {
     const t = slider.valueAsNumber;
     timeEl.innerHTML = "<b>" + fmt(t) + "</b>（第 " + Math.round(t * fps) + " 帧）";
   };
+
+  function setOpen(v, keepMsg) {
+    open = v;
+    tool.hidden = !v;
+    toggleBtn.textContent = v ? "收起" : "选择起点线…";
+    toggleBtn.setAttribute("aria-expanded", v ? "true" : "false");
+    if (v) {
+      say("滑动滑动条找到车压过发车线的画面，再点「用这一帧当起点线」；"
+          + "「恢复自动」退回自动搜到的那条线。");
+      pump();
+    } else if (!keepMsg) {
+      say("");
+    }
+  }
 
   function render(j) {
     shot.src = "data:image/jpeg;base64," + j.jpg;
@@ -838,6 +865,7 @@ new Chart(document.getElementById("cMap"), {
       return;
     }
     mapChart.data.datasets[2].data = j.line.map(p => ({x: p[0], y: p[1]}));
+    mapChart.data.datasets[2].showInLegend = true;
     mapChart.update("none");
     say("已选 " + fmt(j.t) + "，距当前计时线 <b>" + d.toFixed(0) + " 米</b>"
         + (d < 3 ? "（基本还是现在这条线）" : "")
@@ -848,7 +876,7 @@ new Chart(document.getElementById("cMap"), {
   // 画面越拖越滞后。所以同一时刻只留一个请求在飞，中间的位置直接覆盖掉，
   // 保证最后停下时看到的一定是最后一次停留的那一刻。
   function pump() {
-    if (inflight || want === null) return;
+    if (!open || inflight || want === null) return;
     inflight = true;
     const t = want;
     fetch("api/frame?t=" + t.toFixed(4), {cache: "no-store"})
@@ -872,7 +900,7 @@ new Chart(document.getElementById("cMap"), {
     if (!isFinite(want)) want = 0;
     showTime();
     if (byUser) applyBtn.disabled = false;
-    pump();
+    pump();                                 // 收起状态下 pump 自己会直接返回
   }
 
   fetch("api/ping", {cache: "no-store"})
@@ -886,9 +914,10 @@ new Chart(document.getElementById("cMap"), {
       slider.step = String(1 / fps);        // 一格 = 一帧
       slider.disabled = false;
       resetBtn.disabled = false;
+      toggleBtn.disabled = false;
       // 画面按服务端给的原宽度显示，别放大（放大了只是糊）
       if (info.frame_width) shot.style.maxWidth = info.frame_width + "px";
-      say("这是<b>当前计时线</b>所在的那一瞬间。滑动滑动条，找到车压过发车线的画面。");
+      // 先把滑动条放到当前计时线的那一刻；这时工具还收着，不会去取画面
       setT(info.gate_t || 0, false);
     })
     .catch(() => {
@@ -896,10 +925,17 @@ new Chart(document.getElementById("cMap"), {
       slider.disabled = true;
       applyBtn.disabled = true;
       resetBtn.disabled = true;
+      toggleBtn.disabled = true;
       prevBtn.disabled = nextBtn.disabled = true;
-      say('<span class="bad">改计时线需要本地服务</span>：'
+      say('<span class="bad">改起点线需要本地服务</span>：'
           + "用 <b>analyze.py 视频.MP4 --serve</b> 起一次，再从 http://127.0.0.1:8765/ 打开。");
     });
+
+  toggleBtn.addEventListener("click", () => {
+    if (!server || busy) return;
+    setOpen(!open);
+    if (open) slider.focus();
+  });
 
   slider.addEventListener("input", () => setT(slider.valueAsNumber, true));
 
@@ -926,7 +962,7 @@ new Chart(document.getElementById("cMap"), {
   applyBtn.addEventListener("click", () => {
     if (!server || busy) return;
     busy = true;
-    applyBtn.disabled = resetBtn.disabled = true;
+    applyBtn.disabled = resetBtn.disabled = toggleBtn.disabled = true;
     say("正在用「" + fmt(slider.valueAsNumber) + "」这一刻的位置重算整场…");
     fetch("api/gate", {
       method: "POST",
@@ -939,18 +975,21 @@ new Chart(document.getElementById("cMap"), {
           busy = false;
           applyBtn.disabled = false;
           resetBtn.disabled = false;
+          toggleBtn.disabled = false;
           say('<span class="bad">重算失败：</span>' + j.error);
           return;
         }
         say('<span class="ok">✓ 已用新计时线重算</span>：' + j.n_laps + " 圈，最快 "
             + j.best_lap + "（第 " + j.best_lap_no + " 圈），平均 " + j.mean_lap
             + "，标准差 " + j.std_lap.toFixed(3) + " s。正在刷新页面…");
+        // 重算完了就把选取工具收起来（keepMsg 保住上面那句结果），
+        // 页面马上会刷新，刷新后也本来就是收起状态
+        setOpen(false, true);
         setTimeout(() => location.reload(), 1600);
       })
       .catch(() => {
         busy = false;
-        applyBtn.disabled = false;
-        resetBtn.disabled = false;
+        applyBtn.disabled = resetBtn.disabled = toggleBtn.disabled = false;
         say('<span class="bad">请求发不出去</span>，检查本地服务还在不在。');
       });
   });
@@ -958,7 +997,7 @@ new Chart(document.getElementById("cMap"), {
   resetBtn.addEventListener("click", () => {
     if (!server || busy) return;
     busy = true;
-    applyBtn.disabled = resetBtn.disabled = true;
+    applyBtn.disabled = resetBtn.disabled = toggleBtn.disabled = true;
     say("正在恢复自动搜索的计时线…");
     fetch("api/gate", {
       method: "POST",
@@ -969,17 +1008,18 @@ new Chart(document.getElementById("cMap"), {
       .then(j => {
         if (j.error) {
           busy = false;
-          applyBtn.disabled = resetBtn.disabled = false;
+          applyBtn.disabled = resetBtn.disabled = toggleBtn.disabled = false;
           say('<span class="bad">恢复失败：</span>' + j.error);
           return;
         }
         say('<span class="ok">✓ 已恢复自动</span>：' + j.n_laps + " 圈，最快 "
             + j.best_lap + "。正在刷新页面…");
+        setOpen(false, true);
         setTimeout(() => location.reload(), 1200);
       })
       .catch(() => {
         busy = false;
-        applyBtn.disabled = resetBtn.disabled = false;
+        applyBtn.disabled = resetBtn.disabled = toggleBtn.disabled = false;
         say('<span class="bad">请求发不出去</span>，检查本地服务还在不在。');
       });
   });
