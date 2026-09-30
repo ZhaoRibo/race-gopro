@@ -21,7 +21,12 @@ from . import analysis as ana
 from . import laps
 
 # 终端高亮色（非 TTY 时自动关闭）
-_COLOR = sys.stdout.isatty()
+#
+# 注意 sys.stdout 可能是 **None**：PyInstaller 用窗口模式打包的 Windows 程序
+# 就是这样，而这一行是模块级执行的 —— 不加判断的话，光是 import 这个模块
+# 就把程序打死了（v0.1.2 的 Windows 包实测如此）。rapp/__init__.py 里已经
+# 有一道总护栏，这里再自己判一次：模块单独拿出去用也应该是安全的。
+_COLOR = bool(sys.stdout and sys.stdout.isatty())
 
 
 def _c(text: str, code: str) -> str:

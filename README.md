@@ -627,8 +627,9 @@ race-gopro/
 │   ├── app.py           网页应用的入口：选视频 → 分析 → 跳看板
 │   └── demo.py          合成数据生成器（兼做自检）
 └── tests/
-    ├── test_gpmf.py     GPMF 解析器回归测试
-    └── test_paths.py    文件名的跨平台检查（防 Windows checkout 失败）
+    ├── test_gpmf.py        GPMF 解析器回归测试
+    ├── test_paths.py       文件名的跨平台检查（防 Windows checkout 失败）
+    └── test_no_console.py  无控制台启动检查（防 Windows 打包版一启动就弹窗）
 ```
 
 数据在包里是这么往下流的（想加功能就沿着这条链找）：
@@ -698,6 +699,15 @@ macOS 允许文件名里带反斜杠、末尾带空格，Windows 不允许 —�
 
 ```bash
 .venv/bin/python -m tests.test_paths
+```
+
+`tests/test_no_console.py` 验的是打包版的启动条件：Windows 的窗口模式下
+`sys.stdout` / `sys.stderr` 是 `None`（不是空流），导入期任何一句 `print` 或
+`.isatty()` 都会把程序打死。这个坑在 macOS 上永远复现不出来，所以测试干脆在
+子进程里把两个流置成 `None` 再导入一遍：
+
+```bash
+.venv/bin/python -m tests.test_no_console
 ```
 
 想用 pytest 的话得先装（它不在运行依赖里）：
@@ -881,6 +891,12 @@ CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展
   么挂在 Windows 上的（mac 天生 UTF-8，本地怎么测都是绿的）。两道保险都别拆：
   `build.py` / `analyze.py` 开头的 `sys.stdout.reconfigure(encoding="utf-8")`，
   以及 workflow 里的 `PYTHONUTF8: "1"`（它连子进程一起管）。
+- **打包后 Windows 上 `sys.stdout` / `sys.stderr` 是 `None`，不是空流**。任何一句
+  `print`、任何 `.isatty()` 都会当场抛 `AttributeError` —— 而且可能发生在**导入
+  阶段**（`rapp/report.py` 模块级要判断终端支不支持颜色就是），比 `app.py` 里
+  负责把输出接到日志的 `_redirect_output()` 还早，等不到它救命。v0.1.2 的
+  Windows 包一启动就弹窗，就是这么来的。护栏放在 `rapp/__init__.py`（所有入口
+  都要先过包初始化，一处管住全部），`tests/test_no_console.py` 盯着它别改回去。
 - **资源路径**：包里的 ffmpeg 在 `sys._MEIPASS/bin`，用户数据（最近打开过的视频、
   日志）在系统的用户数据目录 —— `.app` 是只读的，不能往自己里面写。
   这些分支都在 `rapp/app.py` 开头那几个函数里。

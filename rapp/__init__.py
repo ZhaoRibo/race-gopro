@@ -18,4 +18,37 @@ rapp - Race Analysis for GoPro
     overlay.py   —— 输出层。把 HUD 烧进原视频
 """
 
-__version__ = "0.1.0"
+import os
+import sys
+
+# ---------------------------------------------------------------------------
+# 没有控制台时，先把 stdout / stderr 补上
+# ---------------------------------------------------------------------------
+# 为什么必须放在这里、而且必须在任何子模块被导入之前：
+#
+# PyInstaller 用 console=False（窗口模式）打包后，Windows 上 sys.stdout 和
+# sys.stderr 不是“空流”，而是 **None**。任何一句 print、任何 `.isatty()`
+# 都会当场抛 AttributeError 把程序打死 —— 而且可能发生在**导入阶段**。
+# report.py 模块级那句“终端支不支持颜色”就是例子，它比 app.py 里负责把输出
+# 接到日志的 _redirect_output() 还早，根本轮不到那道救援。
+#
+# 真实事故：v0.1.2 的 Windows 包一启动就弹窗
+#     AttributeError: 'NoneType' object has no attribute 'isatty'
+#
+# 放在包的 __init__ 里，是因为**所有入口都要先经它**：打包版
+# （entry.py → rapp.app）、源码版（python -m rapp.app）、命令行
+# （analyze.py → from rapp import ...）全都覆盖，一处管住全部。
+# 先接到系统垃圾桶，稍后 app.py 的 _redirect_output() 会换成真正的日志文件。
+if sys.stdout is None or sys.stderr is None:
+    _sink = open(os.devnull, "w", encoding="utf-8", errors="replace")
+    if sys.stdout is None:
+        sys.stdout = _sink
+    if sys.stderr is None:
+        sys.stderr = _sink
+    if sys.__stdout__ is None:
+        sys.__stdout__ = _sink
+    if sys.__stderr__ is None:
+        sys.__stderr__ = _sink
+
+__version__ = "0.1.3"
+"""包版本。发版时和 `packaging/build.py` 里的 `VERSION` 保持一致。"""

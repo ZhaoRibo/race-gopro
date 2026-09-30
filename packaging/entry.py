@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import sys
 
+# 注意：如果 Windows 上是以窗口模式（console=False）启动的，此刻 sys.stdout /
+# sys.stderr 都是 None。救命的那道护栏在 rapp/__init__.py 里 —— 导入 rapp.app
+# 必然先执行包的初始化，所以到这里已经安全了，不要把这个 import 提到上面去。
 from rapp.app import main
 
 if __name__ == "__main__":
