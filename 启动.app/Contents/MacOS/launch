@@ -42,12 +42,15 @@ log="$here/.race-gopro.log"
 PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$PATH"
 export PATH
 
-# 弹个对话框告诉用户出事了，同时把同一句话写进日志
+# 弹个对话框告诉用户出事了，同时把同一句话写进日志。
+# giving up after：没人点它就自己消失 —— 这种框是模态的，留一个在屏幕上
+# 会挡住后面的双击（表现出来就是"得多双击一次才管用"）。
 say() {
   printf '\n%s\n' "$1" >>"$log"
   /usr/bin/osascript -e \
     "display dialog \"$(printf '%s' "$1" | /usr/bin/sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')\" \
-buttons {\"好\"} default button 1 with title \"$name\" with icon caution" >/dev/null 2>&1
+buttons {\"好\"} default button 1 with title \"$name\" with icon caution giving up after 120" \
+    >/dev/null 2>&1
 }
 
 if [ ! -f analyze.py ]; then

@@ -577,11 +577,14 @@ class _App:
         self.quitting = False
 
     # ---- 页面生死 ----
-    def hello(self) -> str:
+    def hello(self, agent: str = "") -> str:
         pid = uuid.uuid4().hex[:12]
         with self.lock:
             self.pages[pid] = time.time()
             self.idle_since = None
+        # 记一行是谁连上来的。排查"双击了没反应"时全靠它：
+        # 有没有页面连上、连上来的是不是真的浏览器，一目了然。
+        print(f"[页面] 连上来了：{agent[:100] or '（没带 User-Agent）'}", flush=True)
         return pid
 
     def alive(self, pid: str) -> None:
@@ -663,7 +666,7 @@ def _make_handler(app: _App) -> type[BaseHTTPRequestHandler]:
         def _app_get(self, path: str, query: dict) -> bool:
             """返回 True 表示这个请求我已经处理掉了。"""
             if path == "/api/hello":
-                self._ok({"id": app.hello()})
+                self._ok({"id": app.hello(self.headers.get("User-Agent") or "")})
                 return True
             if path == "/api/state":
                 st = app.loader.status()
@@ -795,6 +798,43 @@ def _fix_tool_path() -> None:
         print(f"[提示] PATH 里原来没有 ffmpeg，已补上 {os.environ['PATH']}", flush=True)
 
 
+def _open_browser(url: str) -> None:
+    """
+    把默认浏览器叫起来打开这个地址。
+
+    macOS 上直接用 `/usr/bin/open`，不走 webbrowser 模块的 osascript 路线：
+    osascript 是发 Apple Event，会碰上「自动化」权限（第一次可能弹授权框、
+    或者被系统默默拒掉，而 `open` 只是个普通子进程，没这层事）。
+    """
+    if sys.platform == "darwin" and Path("/usr/bin/open").exists():
+        req = subprocess.run(["/usr/bin/open", url], capture_output=True, text=True)
+        if req.returncode == 0:
+            return
+        print(f"[提示] /usr/bin/open 没成功（{req.stderr.strip()}），换 webbrowser 再试",
+              flush=True)
+    webbrowser.open(url)
+
+
+def _watch_first_page(app: "_App", url: str) -> None:
+    """
+    过几秒看看到底有没有页面连上来，没有就再叫一次浏览器。
+
+    为什么要这么土："叫浏览器打开地址"这件事 macOS 不给回执 —— 第一次调用可能
+    被系统吞掉（自动化权限、LaunchServices 正在注册、浏览器自己抽风…），用户
+    看到的就是「双击了一下没反应，得再双击一次」。与其猜是哪种，不如几秒后看
+    有没有人来连；没人来就再喊一声，反正喊重复了也只是多开一个标签页。
+
+    页面一旦连上就退出，不会再干扰后面"关页面就退出"那套逻辑。
+    """
+    for delay in (6.0, 12.0):
+        time.sleep(delay)
+        with app.lock:
+            if app.pages:
+                return
+        print(f"[提示] {delay:.0f} 秒了还没有页面连上来，再打开一次浏览器…", flush=True)
+        _open_browser(url)
+
+
 # ==========================================================================
 def run(port: int = 8765, open_browser: bool = True) -> int:
     """起应用并阻塞到退出。返回进程退出码。"""
@@ -811,7 +851,7 @@ def run(port: int = 8765, open_browser: bool = True) -> int:
         print(f"\n端口 {port} 已经被占用 —— 大概率是本程序已经开着一个了。")
         print(f"直接给你打开那个：{url}")
         if open_browser:
-            webbrowser.open(url)
+            _open_browser(url)
         return 0
 
     app.httpd = httpd
@@ -826,7 +866,8 @@ def run(port: int = 8765, open_browser: bool = True) -> int:
     print("  关掉浏览器页面程序会自己退出；也可以在这个窗口按 Ctrl+C。")
     print("─" * 58, flush=True)
     if open_browser:
-        webbrowser.open(url)
+        _open_browser(url)
+        threading.Thread(target=_watch_first_page, args=(app, url), daemon=True).start()
 
     try:
         httpd.serve_forever()
