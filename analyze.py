@@ -135,7 +135,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--list-streams", action="store_true", help="只列出视频里的遥测流，不做分析")
     p.add_argument("--list-gates", action="store_true",
-                   help="只列出候选起点线（按偏僻度排序），不做分析")
+                   help="只列出候选起点线（按直道优先排序），不做分析")
     p.add_argument("--selftest", action="store_true", help="用合成数据自检整条流水线")
     p.add_argument("-q", "--quiet", action="store_true", help="少打印一些中间信息")
 
