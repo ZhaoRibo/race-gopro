@@ -103,18 +103,21 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .pickerbtns button:hover{color:var(--fg);border-color:#39414d;background:#1c2430;}
   .picker .hint{margin:9px 0 0;color:var(--dim);font-size:11.5px;line-height:1.6;}
 
-  /* 「单圈 HUD 视频」区块 */
-  .hudrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;}
-  .hudrow select,.hudrow button{background:var(--panel);color:var(--fg);
+  /* 「单圈 HUD 视频」和「改计时线」两排控件共用一套样式 */
+  .hudrow,.gatebar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px;}
+  .hudrow select,.hudrow button,.gatebar button{background:var(--panel);color:var(--fg);
         border:1px solid var(--line);border-radius:7px;padding:6px 11px;
         font-size:12.5px;font-family:inherit;}
   .hudrow select{cursor:pointer;min-width:190px;}
-  .hudrow button{cursor:pointer;}
-  .hudrow button:hover{background:#1c2430;border-color:#39414d;}
-  .hudrow button.primary{background:#1f6feb;border-color:#2a7bf0;color:#fff;font-weight:600;}
-  .hudrow button.primary:hover{background:#2a7bf0;border-color:#3b86f5;}
-  .hudrow button:disabled{opacity:.45;cursor:not-allowed;}
-  .hudrange{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;}
+  .hudrow button,.gatebar button{cursor:pointer;}
+  .hudrow button:hover,.gatebar button:hover{background:#1c2430;border-color:#39414d;}
+  .hudrow button.primary,.gatebar button.primary{background:#1f6feb;border-color:#2a7bf0;color:#fff;font-weight:600;}
+  .hudrow button.primary:hover,.gatebar button.primary:hover{background:#2a7bf0;border-color:#3b86f5;}
+  .hudrow button:disabled,.gatebar button:disabled{opacity:.45;cursor:not-allowed;}
+  .hudrange,.gaterange{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;}
+  .gaterange b{color:var(--fg);}
+  .gaterange .ok{color:#3fb950;}
+  .gaterange .bad{color:#f0c674;}
   .hudbar{height:6px;background:#232a33;border-radius:4px;overflow:hidden;margin-top:11px;}
   .hudbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s;}
   .hudmsg{margin:9px 0 0;font-size:12.5px;color:var(--dim);line-height:1.75;}
@@ -204,8 +207,13 @@ _TEMPLATE = r"""<!DOCTYPE html>
 
   <section>
     <h2>赛道俯视图</h2>
-    <p class="hint">颜色代表速度。白色的短直线是起点线，标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。</p>
+    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>在图上点一下可以直接挪计时线</b> —— 点完按「用这条线重算」，整场会重新切圈，圈速/图表/看板一起刷新。</p>
     <div class="chartbox wide-square"><canvas id="cMap"></canvas></div>
+    <div class="gatebar">
+      <span class="gaterange" id="gateMsg"></span>
+      <button class="primary" id="gateApply" type="button" disabled>用这条线重算</button>
+      <button id="gateReset" type="button">恢复自动</button>
+    </div>
   </section>
 
   <section>
@@ -694,14 +702,21 @@ new Chart(document.getElementById("cMap"), {
     type: "line",
     data: map.gate.map(p => ({x: p[0], y: p[1]})),
     borderColor: "#ffffff", borderWidth: 2.5, pointRadius: 0, fill: false
+  }, {
+    label: "新计时线",
+    type: "line",
+    data: [],
+    borderColor: "#22d3ee", borderWidth: 3, pointRadius: 0, fill: false
   }]},
   options: {
     responsive: true, maintainAspectRatio: false,
+    // 点一下就把候选计时线放到那个位置（见下面的 gatePick）
+    onClick: (evt, _els, chart) => gatePick(evt, chart),
     plugins: {
       legend: {labels: {boxWidth: 14, boxHeight: 3, font: {size: 11}}},
       tooltip: {callbacks: {label: c => c.datasetIndex === 0
         ? c.raw.s.toFixed(1) + " km/h"
-        : "起点线"}}
+        : (c.datasetIndex === 1 ? "当前计时线" : "新计时线")}}
     },
     scales: {
       x: {min: mapCx - mapHalf, max: mapCx + mapHalf,
@@ -711,6 +726,132 @@ new Chart(document.getElementById("cMap"), {
     }
   }
 });
+
+// ---------- 手动改计时线 ----------
+// 在赛道图上点一下选位置 —— 服务端会把这个坐标吸附到最近的采样点，
+// 并按那一点的行驶方向定过线方向（见 rapp/laps.py 的 gate_by_xy）。
+// 这里先画一条预览线，让用户看清楚切在哪儿、垂不垂直。
+(function gateMaker(){
+  const msg = document.getElementById("gateMsg");
+  const applyBtn = document.getElementById("gateApply");
+  const resetBtn = document.getElementById("gateReset");
+  if (!msg) return;
+
+  let server = null;      // ping 通了才有值
+  let picked = null;      // 选中的位置（投影坐标，米）
+  let busy = false;
+
+  const say = html => { msg.innerHTML = html; };
+
+  window.gatePick = null;
+
+  fetch("api/ping", {cache: "no-store"})
+    .then(r => r.json())
+    .then(info => {
+      server = info;
+      resetBtn.disabled = false;
+      say("在图上点一下选新位置。「恢复自动」可以退回自动搜到的那条线。");
+    })
+    .catch(() => {
+      server = null;
+      applyBtn.disabled = true;
+      resetBtn.disabled = true;
+      say('<span class="bad">改计时线需要本地服务</span>：'
+          + "用 <b>analyze.py 视频.MP4 --serve</b> 起一次，再从 http://127.0.0.1:8765/ 打开。");
+    });
+
+  // 供图表 onClick 调用（挂在 window 上，跟图表的创建顺序无关）
+  window.gatePick = function (evt, chart) {
+    if (!server || busy) return;
+    const x = chart.scales.x.getValueForPixel(evt.x);
+    const y = chart.scales.y.getValueForPixel(evt.y);
+    if (!isFinite(x) || !isFinite(y)) return;
+
+    // 吸附到赛道上最近的一点
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < map.x.length; i++) {
+      const d = (map.x[i] - x) ** 2 + (map.y[i] - y) ** 2;
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    // 用前后各 5 个点估一下这一点的走向，法向就是计时线方向
+    const i0 = Math.max(0, best - 5), i1 = Math.min(map.x.length - 1, best + 5);
+    let tx = map.x[i1] - map.x[i0], ty = map.y[i1] - map.y[i0];
+    const tl = Math.hypot(tx, ty) || 1;
+    tx /= tl; ty /= tl;
+    const nx = -ty, ny = tx, half = 14;
+    const gx = map.x[best], gy = map.y[best];
+
+    chart.data.datasets[2].data = [
+      {x: gx - nx * half, y: gy - ny * half},
+      {x: gx + nx * half, y: gy + ny * half}
+    ];
+    chart.update("none");
+    picked = {x: gx, y: gy};
+    applyBtn.disabled = false;
+    say("已选好位置，点「用这条线重算」。会重新切圈，图表和看板全部刷新（几秒）。");
+  };
+
+  applyBtn.addEventListener("click", () => {
+    if (!picked || !server || busy) return;
+    busy = true;
+    applyBtn.disabled = resetBtn.disabled = true;
+    say("正在用新计时线重算…");
+    fetch("api/gate", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(picked)
+    })
+      .then(r => r.json())
+      .then(j => {
+        if (j.error) {
+          busy = false;
+          applyBtn.disabled = false;
+          resetBtn.disabled = false;
+          say('<span class="bad">重算失败：</span>' + j.error);
+          return;
+        }
+        say('<span class="ok">✓ 已用新计时线重算</span>：' + j.n_laps + " 圈，最快 "
+            + j.best_lap + "（第 " + j.best_lap_no + " 圈），平均 " + j.mean_lap
+            + "，标准差 " + j.std_lap.toFixed(3) + " s。正在刷新页面…");
+        setTimeout(() => location.reload(), 1600);
+      })
+      .catch(() => {
+        busy = false;
+        applyBtn.disabled = false;
+        resetBtn.disabled = false;
+        say('<span class="bad">请求发不出去</span>，检查本地服务还在不在。');
+      });
+  });
+
+  resetBtn.addEventListener("click", () => {
+    if (!server || busy) return;
+    busy = true;
+    applyBtn.disabled = resetBtn.disabled = true;
+    say("正在恢复自动搜索的计时线…");
+    fetch("api/gate", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({auto: true})
+    })
+      .then(r => r.json())
+      .then(j => {
+        if (j.error) {
+          busy = false;
+          applyBtn.disabled = resetBtn.disabled = false;
+          say('<span class="bad">恢复失败：</span>' + j.error);
+          return;
+        }
+        say('<span class="ok">✓ 已恢复自动</span>：' + j.n_laps + " 圈，最快 "
+            + j.best_lap + "。正在刷新页面…");
+        setTimeout(() => location.reload(), 1200);
+      })
+      .catch(() => {
+        busy = false;
+        applyBtn.disabled = resetBtn.disabled = false;
+        say('<span class="bad">请求发不出去</span>，检查本地服务还在不在。');
+      });
+  });
+})();
 
 function speedColor(s, lo, hi) {
   const t = Math.max(0, Math.min(1, (s - lo) / Math.max(hi - lo, 1e-6)));

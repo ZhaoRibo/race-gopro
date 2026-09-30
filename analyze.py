@@ -404,6 +404,12 @@ def main(argv: list[str] | None = None) -> int:
             crf=args.overlay_crf,
             preset=args.overlay_preset,
             show_trace=not args.no_trace,
+            # 看板里改计时线时要按同一套参数重算，所以这些也得传过去
+            sectors=args.sectors,
+            grid_step=args.grid_step,
+            write_csv=not args.no_csv,
+            write_charts=not args.no_charts,
+            write_dashboard=not args.no_dashboard,
         )
 
     return 0

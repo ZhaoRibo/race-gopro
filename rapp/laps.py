@@ -786,13 +786,24 @@ def gate_by_index(tel: telemetry.Telemetry, n: int, **kw) -> Gate:
     return _to_gate(cands[n - 1], cands)
 
 
+def gate_by_xy(tel: telemetry.Telemetry, x: float, y: float) -> Gate:
+    """
+    用赛道图上的平面坐标（米）指定起点线。
+
+    和 gate_by_latlon 干的是同一件事，只是直接把投影坐标吃进来 —— 看板上点
+    的那一下本来就是投影坐标，绕一圈经纬度反而白白掉精度。只取最近的**采样点**：
+    用户点的地方未必正好在轨迹上，而计时线必须落在车真的走过的位置上。
+    """
+    j = int(np.argmin(np.hypot(tel.x - x, tel.y - y)))
+    return _gate_from_index(tel, j)
+
+
 def gate_by_latlon(tel: telemetry.Telemetry, lat: float, lon: float) -> Gate:
     """用经纬度指定起点线（从赛道图上读坐标时用）。"""
     gx, gy, _, _ = geo.to_local_xy(
         np.array([lat]), np.array([lon]), tel.lat0, tel.lon0
     )
-    j = int(np.argmin(np.hypot(tel.x - gx[0], tel.y - gy[0])))
-    gate = _gate_from_index(tel, j)
+    gate = gate_by_xy(tel, float(gx[0]), float(gy[0]))
     # 保留用户输入的经纬度原值（描述里要显示他填的那个，而不是最近点的）
     gate.lat, gate.lon = float(lat), float(lon)
     return gate
@@ -1138,5 +1149,6 @@ __all__ = [
     "gate_by_index",
     "gate_by_latlon",
     "gate_by_time",
+    "gate_by_xy",
     "search_gates",
 ]

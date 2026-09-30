@@ -22,6 +22,8 @@
     POST /api/hud   {"lap": 8}   开始生成第 8 圈的 HUD，返回任务号
     GET  /api/hud?id=xxx         查进度
     POST /api/hud/cancel {"id"}  取消
+    POST /api/gate  {"x": 12.3, "y": -40.5}   用这个位置当计时线重算整场
+    POST /api/gate  {"auto": true}             恢复成自动搜索的计时线
 
 刻意不做的事：不排队、不并发。同一时刻只允许一个出片任务 —— 编码本来就吃满
 所有核心，同时跑两个只会让两个都变慢。
@@ -39,7 +41,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import analysis as ana
+from . import charts
+from . import dashboard
+from . import laps
 from . import overlay
+from . import report
 
 PAD_SECONDS = 5.0
 """出片时在每圈前后各留几秒 —— 不然过线那一瞬间的内容会被切掉。"""
@@ -77,16 +83,27 @@ class _State:
     """服务端共享状态：这次分析的结果 + 出片任务表。"""
 
     def __init__(self, sa: ana.SessionAnalysis, outdir: Path, video: Path, *,
-                 fps: float, crf: int, preset: str, show_trace: bool) -> None:
+                 fps: float, crf: int, preset: str, show_trace: bool,
+                 sectors: int = 3, grid_step: float = 1.0,
+                 write_csv: bool = True, write_charts: bool = True,
+                 write_dashboard: bool = True) -> None:
         self.sa = sa
+        self.tel = sa.lapset.telemetry
         self.outdir = outdir.resolve()
         self.video = video.resolve()
         self.fps = fps
         self.crf = crf
         self.preset = preset
         self.show_trace = show_trace
+        # 重算计时线时要沿用的分析参数（和命令行那一次保持一致）
+        self.sectors = sectors
+        self.grid_step = grid_step
+        self.write_csv = write_csv
+        self.write_charts = write_charts
+        self.write_dashboard = write_dashboard
         self.jobs: dict[str, _Job] = {}
         self.lock = threading.Lock()
+        self._rebuild_lock = threading.Lock()
 
     # ---- 圈的起止时间 ----
     def lap_range(self, lap_index: int) -> tuple[float, float]:
@@ -104,6 +121,60 @@ class _State:
 
     def running(self) -> _Job | None:
         return next((j for j in self.jobs.values() if j.state == "running"), None)
+
+    # ---- 换计时线重算 ----
+    def rebuild(self, gate: laps.Gate | None) -> dict:
+        """
+        用新的计时线重算整场，并把产物全部重写一遍。gate 给 None 就是回到自动搜索。
+
+        为什么不先预览再应用：重算本身只要几秒（解析过的遥测直接复用），
+        而产物必须整体重写（圈号变了，图表/看板/CSV 全都跟着变）。
+        不满意就再点一下，或者在页上点「恢复自动」。
+        """
+        if self.tel is None:
+            raise RuntimeError("这份数据里没有遥测，改不了计时线。")
+        if self.running() is not None:
+            raise RuntimeError(
+                "有出片任务正在跑，等它完成再改计时线 —— 不然出来的片段和重算后的圈号对不上。"
+            )
+        if not self._rebuild_lock.acquire(blocking=False):
+            raise RuntimeError("上一次重算还没结束，稍等一下。")
+        try:
+            lapset = laps.compute_lapset(
+                self.tel, gate=gate,
+                sectors=self.sectors, grid_step=self.grid_step, verbose=False,
+            )
+            if not lapset.laps:
+                raise RuntimeError("这条线切不出完整的圈，换个位置试试。")
+            sa = ana.analyze(lapset, verbose=False)
+
+            if self.write_csv:
+                report.export_csv(sa, self.outdir / "tables")
+                report.export_json(sa, self.outdir / "tables" / "analysis.json")
+            if self.write_charts:
+                charts.make_all(sa, self.outdir / "charts")
+            if self.write_dashboard:
+                dashboard.build(sa, self.outdir / "dashboard.html", hud_pad=PAD_SECONDS)
+
+            self.sa = sa
+            best = sa.lapset.best_lap
+            g = sa.lapset.gate
+            print(f"[计时线] 已重算：{len(sa.lapset.laps)} 圈，"
+                  f"最快 {laps.format_lap_time(best.duration) if best else '—'}"
+                  f"（{'手动指定' if gate is not None else '自动搜索'}）", flush=True)
+            return {
+                "ok": True,
+                "n_laps": len(sa.lapset.laps),
+                "best_lap": laps.format_lap_time(best.duration) if best else "—",
+                "best_lap_no": best.index if best else 0,
+                "mean_lap": laps.format_lap_time(sa.lapset.mean_lap),
+                "std_lap": round(float(sa.lapset.std_lap), 3),
+                "gate": {"x": round(g.x, 1), "y": round(g.y, 1),
+                         "lat": round(g.lat, 6), "lon": round(g.lon, 6)},
+                "manual": gate is not None,
+            }
+        finally:
+            self._rebuild_lock.release()
 
     def start(self, lap_index: int) -> _Job:
         with self.lock:
@@ -321,6 +392,24 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                 ok = state.cancel(str(body.get("id") or ""))
                 self._json({"ok": ok})
                 return
+            if path == "/api/gate":
+                try:
+                    if body.get("auto"):
+                        summary = state.rebuild(None)
+                    else:
+                        try:
+                            gx, gy = float(body["x"]), float(body["y"])
+                        except (KeyError, TypeError, ValueError) as exc:
+                            raise ValueError(
+                                "要给出赛道图上的坐标：{\"x\": 米, \"y\": 米}，"
+                                "或者 {\"auto\": true} 回到自动搜索。"
+                            ) from exc
+                        summary = state.rebuild(laps.gate_by_xy(state.tel, gx, gy))
+                except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+                    self._json({"error": str(exc)}, 400)
+                else:
+                    self._json(summary)
+                return
             self._json({"error": "没有这个接口"}, 404)
 
     return Handler
@@ -328,10 +417,16 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
 
 def run(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
         port: int = 8765, fps: float = 15.0, crf: int = 20,
-        preset: str = "medium", show_trace: bool = True) -> int:
+        preset: str = "medium", show_trace: bool = True,
+        sectors: int = 3, grid_step: float = 1.0,
+        write_csv: bool = True, write_charts: bool = True,
+        write_dashboard: bool = True) -> int:
     """起服务并一直阻塞到 Ctrl+C。返回进程退出码。"""
     state = _State(sa, Path(outdir), Path(video), fps=fps, crf=crf,
-                   preset=preset, show_trace=show_trace)
+                   preset=preset, show_trace=show_trace,
+                   sectors=sectors, grid_step=grid_step,
+                   write_csv=write_csv, write_charts=write_charts,
+                   write_dashboard=write_dashboard)
     try:
         httpd = ThreadingHTTPServer((_HOST, port), _make_handler(state))
     except OSError as exc:
@@ -343,7 +438,7 @@ def run(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
     print("\n" + "─" * 56)
     print("  本地服务已启动，用浏览器打开：")
     print(f"    {url}")
-    print("  只有从这个地址打开的看板，「生成 HUD 视频」按钮才管用")
+    print("  只有从这个地址打开的看板，「生成 HUD 视频」和「改计时线」才管用")
     print("  （双击 dashboard.html 不行 —— 浏览器不允许它调用 ffmpeg）")
     print(f"  源视频：{state.video}")
     print(f"  出片参数：{fps:g} fps / crf {crf} / preset {preset}"
