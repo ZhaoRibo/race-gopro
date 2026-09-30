@@ -61,7 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--demo", action="store_true", help="用合成数据演示，不需要真实视频")
 
     p.add_argument("--gate", type=_parse_latlon, metavar="纬,经",
-                   help="手动指定起终点线的经纬度（自动识别不准时使用）")
+                   help="手动指定起点线：直接给经纬度（从赛道图上读坐标用）")
+    p.add_argument("--gate-time", type=float, metavar="秒",
+                   help="手动指定起点线：视频第 N 秒车正好过线（最容易上手）")
+    p.add_argument("--gate-index", type=int, metavar="N",
+                   help="从 --list-gates 的候选表里挑第 N 条（编号从 1 开始）")
     p.add_argument("--sectors", type=int, default=3, help="分段数量（默认 3）")
     p.add_argument("--grid-step", type=float, default=1.0, help="圈间对比的距离网格步长，米（默认 1.0）")
     p.add_argument("--min-laps", type=int, default=2, help="至少要有多少圈才认为识别成功（默认 2）")
@@ -79,6 +83,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-trace", action="store_true", help="HUD 里不画速度曲线小图")
 
     p.add_argument("--list-streams", action="store_true", help="只列出视频里的遥测流，不做分析")
+    p.add_argument("--list-gates", action="store_true",
+                   help="只列出候选起点线（按偏僻度排序），不做分析")
     p.add_argument("--selftest", action="store_true", help="用合成数据自检整条流水线")
     p.add_argument("-q", "--quiet", action="store_true", help="少打印一些中间信息")
 
@@ -102,6 +108,40 @@ def list_streams(video: Path) -> int:
         print(f"  {name:<8} {st.times.size:>8} 个采样点  "
               f"{st.rate:>7.2f} Hz  单位={st.units or '?':<10} "
               f"值域=[{st.values.min()}, {st.values.max()}]")
+    return 0
+
+
+def list_gates(video: Path) -> int:
+    """列出所有合格的候选起点线，供用户挑选。"""
+    tel = telemetry.load(video, verbose=False)
+    try:
+        cands = laps.search_gates(tel)
+    except RuntimeError as exc:
+        print(f"搜索失败：{exc}", file=sys.stderr)
+        return 1
+
+    if not cands:
+        print("没有找到任何合格的候选起点线。可能是本次录制里有效圈数不足 2 圈，"
+              "或者 GPS 信号太差。", file=sys.stderr)
+        return 1
+
+    print(f"文件：{video}")
+    print(f"全程里程约 {float(tel.dist[-1]):.0f} m\n")
+    report.print_gate_candidates(cands)
+
+    # 顺便说明自动搜索会选哪一条，方便对比
+    try:
+        auto = laps.find_gate(tel)
+    except RuntimeError:
+        return 0
+    hit = laps._nearest_candidate(auto, cands)
+    if hit is not None:
+        rank = hit[0]
+        print(f"\n  ⚠ 自动搜索会选候选 #{rank}（策略：偏僻度达标的前提下**优先直道**、"
+              f"再取过线最早的那条），不是排第一的 #1。")
+    else:
+        print("\n  ⚠ 自动搜索选中位置离候选表里每一条都超过 50 m。")
+    print("  想换线：加 --gate-index N 选某一条，或加 --gate-time 秒 自己指定过线时刻。")
     return 0
 
 
@@ -136,6 +176,26 @@ def main(argv: list[str] | None = None) -> int:
             print("请指定要检查的视频文件。", file=sys.stderr)
             return 2
         return list_streams(args.video[0])
+
+    # ------------------------------------------------------------------
+    # 只看候选起点线
+    # ------------------------------------------------------------------
+    if args.list_gates:
+        if not args.video:
+            print("请指定要检查的视频文件。", file=sys.stderr)
+            return 2
+        return list_gates(args.video[0])
+
+    # 四种指定起点线的方式只能用一个（都不给就自动搜索）
+    chosen = [
+        ("--gate", args.gate is not None),
+        ("--gate-time", args.gate_time is not None),
+        ("--gate-index", args.gate_index is not None),
+    ]
+    if sum(1 for _, on in chosen if on) > 1:
+        names = "、".join(n for n, on in chosen if on)
+        print(f"{names} 只能用其中一个，请去掉多余的。", file=sys.stderr)
+        return 2
 
     # ------------------------------------------------------------------
     # 取数据
@@ -179,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     lapset = laps.compute_lapset(
         tel,
         gate_latlon=args.gate,
+        gate_time=args.gate_time,
+        gate_index=args.gate_index,
         sectors=args.sectors,
         grid_step=args.grid_step,
         verbose=verbose,

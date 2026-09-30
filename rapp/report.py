@@ -201,6 +201,40 @@ def print_corner_table(sa: ana.SessionAnalysis) -> None:
             )
 
 
+def print_gate_candidates(cands: list[laps.GateCandidate]) -> None:
+    """
+    候选起点线表。
+
+    **先按「转弯量」（直不直）排、再按偏僻度排**。赛道上的起点线通常都放在
+    **直道**上（裁判位、发车格都在直道边），所以“这块直不直”是第一判据。
+    「转弯量」= 线的前后各 30 米内车一共转了多少度，0° = 完全笔直。
+    """
+    print(_bold("═" * 78))
+    print(_bold(" 候选起点线"))
+    print(_bold("═" * 78))
+    headers = ["编号", "圈内位置", "转弯量", "偏僻度", "圈数", "圈时变异", "距离变异", "经纬度"]
+    rows = [
+        [
+            f"#{k}",
+            f"{c.distance_along:>4.0f} m",
+            f"{c.turn_deg:>5.1f}°",
+            f"{c.clearance:.1f} m",
+            f"{c.n_laps}",
+            f"{c.lap_cov * 100:.2f}%",
+            f"{c.dist_cov * 100:.2f}%",
+            f"{c.lat:.6f}, {c.lon:.6f}",
+        ]
+        for k, c in enumerate(cands, 1)
+    ]
+    print(_table(headers, rows))
+    print()
+    print("  说明：「转弯量」越小说明这条线越靠直道（前后 30 米内车的总转向角）；")
+    print("        「偏僻度」越大说明这条线离赛道上别的部分越远，越不容易穿错；")
+    print("        「圈时变异」越小说明切出来的圈速越自洽；「距离变异」变大就说明")
+    print("        这条线被重复穿过了（同一圈穿了两次），要避开。「圈内位置」是")
+    print("        这条线在赛道一圈里的位置（米），可以拿它和赛道图对照。")
+
+
 def print_report(sa: ana.SessionAnalysis) -> None:
     """完整报表。"""
     ls = sa.lapset
@@ -358,4 +392,11 @@ def export_json(sa: ana.SessionAnalysis, path: str | Path) -> Path:
     return path
 
 
-__all__ = ["export_csv", "export_json", "print_corner_table", "print_lap_table", "print_report"]
+__all__ = [
+    "export_csv",
+    "export_json",
+    "print_corner_table",
+    "print_gate_candidates",
+    "print_lap_table",
+    "print_report",
+]

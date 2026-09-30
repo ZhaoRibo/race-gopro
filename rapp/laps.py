@@ -53,6 +53,66 @@ MAX_LAP_SECONDS = 300.0
 GATE_HALF_WIDTH = 8.0
 """门的半宽（米）：穿线点必须落在这个范围内才算数。"""
 
+MOVING_SPEED_MS = 3.0
+"""超过这个速度（m/s）算"真在行驶"。用来剔除起步前 / 收车后的停车样本。"""
+
+GATE_STRAIGHT_HALF_M = 30.0
+"""判断"这块直不直"时，看线的前后各多少米。"""
+
+GATE_MERGE_DISTANCE = 50.0
+"""候选表里两条线之间至少隔多远（米）。
+
+两个作用：
+  · **去重**：撒点间隔只有 3 米，不合并的话候选表里会挤满同一条线的不同写法
+  · **拉开**：只去重而不拉间距的话，前几名会全部挤在赛道上偏僻度最大的那一小段，
+    用户想“把线换到另一个弯”根本做不到
+"""
+
+GATE_LIST_LIMIT = 10
+"""候选表最多列几条。"""
+
+
+@dataclass
+class GateCandidate:
+    """一条**候选**起终点线，用来给用户列举、挑选（见 `search_gates`）。"""
+
+    index: int
+    """在轨迹采样点里的下标。"""
+
+    x: float
+    y: float
+    lat: float
+    lon: float
+    direction: np.ndarray
+    clearance: float
+    first_cross: float
+    """第一次过线的时刻，秒。"""
+    n_laps: int
+    lap_cov: float
+    """圈时变异系数。"""
+    dist_cov: float
+    """每圈行驶距离的变异系数。"""
+    distance_along: float
+    """这个点在**一圈之内**的位置（米，从被采样的那一圈起点起算）。
+
+    注意不是“距录制起点沿轨迹的累计里程” —— 那是 9000+ 米，而赛道一圈只有
+    800 米左右，拿累计里程根本对不上赛道图上的位置。
+    """
+
+    turn_deg: float
+    """「转弯量」：线的前后各 `GATE_STRAIGHT_HALF_M` 米内，车一共转了多少度。
+
+    **0° = 完全笔直**，越大越弯。为什么需要这个指标：赛道上的起点线通常都放在
+    **直道**上（裁判位、发车格都在直道边）。放在弯道上的线不光不合习惯，
+    而且弯中车是斜着走的，过线那个瞬间的位置抖动会更大。
+    """
+
+
+    @property
+    def score(self) -> float:
+        """自洽性得分：圈时和每圈距离都越一致越好。"""
+        return 1.0 / (1.0 + self.lap_cov + self.dist_cov)
+
 
 @dataclass
 class Gate:
@@ -76,6 +136,13 @@ class Gate:
 
     gate_index: int
     """在轨迹采样点里的下标，调试用。"""
+
+    candidates: list[GateCandidate] = field(default_factory=list)
+    """本次搜索找到的所有合格候选线（按偏僻度降序，已合并同处重复项）。
+
+    只用来给用户提示"想换一条的话有哪些选择"，不参与切圈计算。
+    手动指定的门这里是空的。
+    """
 
     def describe(self) -> str:
         return (
@@ -271,21 +338,51 @@ def format_delta(seconds: float) -> str:
 # ==========================================================================
 # 候选门生成
 # ==========================================================================
+def _longest_driving_run(tel: telemetry.Telemetry) -> slice:
+    """
+    找出一段**连续行驶**的样本区间（最长的那一段）。
+
+    为什么要单独找：起步前集合、收车后停车，这些样本全都挤在轨迹上的同一个点，
+    而那个点离轨迹质心很远。算自相关时它们在**小滞后**处互相高度相关，
+    会把整条曲线压成单调下降 —— 实测 GX010047 因此把圈时估成 9.9 s（真实 48.6 s）。
+    """
+    moving = np.asarray(tel.speed, dtype=np.float64) > MOVING_SPEED_MS
+    if not moving.any():
+        return slice(0, tel.t.size)
+
+    # 找连续段：diff 不为 0 处就是段的边界
+    edges = np.flatnonzero(np.diff(moving.astype(np.int8)) != 0) + 1
+    bounds = np.concatenate([[0], edges, [tel.t.size]])
+    best = (0, 0)
+    for k in range(bounds.size - 1):
+        a, b = int(bounds[k]), int(bounds[k + 1])
+        if moving[a] and (b - a) > best[1] - best[0]:
+            best = (a, b)
+    if best[1] - best[0] < 60:  # 行驶段太短，不如用全程
+        return slice(0, tel.t.size)
+    return slice(best[0], best[1])
+
+
 def _estimate_lap_period(tel: telemetry.Telemetry, min_seconds: float = 10.0) -> float:
     """
-    估计"跑一圈要多少秒"。
+    估计「跑一圈要多少秒」。
 
     原理：把轨迹看成复数序列 z = x + i·y，它每跑一圈就会回到几乎相同的取值，
     所以**自相关函数**在"一圈"这个滞后处会出现峰值。用 FFT 算自相关，
     复杂度 O(n log n)，比逐点比较快得多。
 
-    这个周期后面有两个用途：
+    ⚠ **只在连续行驶的那一段上算**（见 `_longest_driving_run`）。停车样本会把
+    峰值彻底盖住，实测能让估计值错到五分之一，而圈时估错会连带把撒点窗口
+    缩短到赛道的一小段，候选线就只覆盖得到局部了。
+
+    这个周期有两个用途：
         · 只从"一圈"的轨迹里撒候选点（轨迹会重复，多圈撒点纯属浪费）
         · 判断"哪些采样点和当前点属于同一圈"，这是算偏僻度的前提
     """
-    t = tel.t
-    x = np.asarray(tel.x, dtype=np.float64)
-    y = np.asarray(tel.y, dtype=np.float64)
+    sl = _longest_driving_run(tel)
+    t = np.asarray(tel.t[sl], dtype=np.float64)
+    x = np.asarray(tel.x[sl], dtype=np.float64)
+    y = np.asarray(tel.y[sl], dtype=np.float64)
     if t.size < 60:
         return float("nan")
 
@@ -316,11 +413,49 @@ def _estimate_lap_period(tel: telemetry.Telemetry, min_seconds: float = 10.0) ->
     return float(lag * dt)
 
 
+def _turn_amount(tel: telemetry.Telemetry, i: int, half_metres: float = GATE_STRAIGHT_HALF_M) -> float:
+    """
+    第 i 点前后各 half_metres 米内，车的航向一共转了多少度。
+
+    **0° = 完全笔直**。用"总绝对变化"而不是"首尾差"：S 形弯的首尾差也是 0，
+    但那地方显然不适合画起点线。
+    """
+    t_i = float(tel.t[i])
+    near = np.abs(tel.t - t_i) < 1.5
+    v = float(np.median(tel.speed[near])) if near.any() else MOVING_SPEED_MS
+    half_s = half_metres / max(v, MOVING_SPEED_MS)
+    w = np.abs(tel.t - t_i) <= half_s
+    if int(w.sum()) < 3:
+        return float("nan")
+    h = np.unwrap(np.asarray(tel.heading[w], dtype=np.float64))
+    return float(np.degrees(np.sum(np.abs(np.diff(h)))))
+
+
+def _clearance_at(tel: telemetry.Telemetry, i: int, span: float) -> float:
+    """
+    轨迹上第 i 个点离"**同一圈里其它部分**的赛道"最近有多远（米）。
+
+    越大越安全：门开在赛道自己旁边的话，同一圈会穿过两次，圈速必然算错。
+
+    ⚠ 判据必须用"时间差落在**一个圈时之内**"（span），不能简单地用"时间上相隔较远"。
+    后者会把**下一圈的同一个位置**也算进来 —— 而它和当前点的距离本来就是 0
+    （跑的是同一条线），于是所有候选的偏僻度全变成 0，筛选完全失效。
+    """
+    lag = np.abs(tel.t - tel.t[i])
+    far = (lag > 3.0) & (lag < span)
+    if far.sum() < 5:
+        return 50.0  # 数据不足，给一个中性值
+    return float(np.min(np.hypot(tel.x[far] - tel.x[i], tel.y[far] - tel.y[i])))
+
+
 def _candidate_gates(
     tel: telemetry.Telemetry, spacing: float, lap_period: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    沿轨迹按固定弧长间隔撒候选点，返回 (下标数组, 切向单位向量, 偏僻度)。
+    沿轨迹按固定弧长间隔撒候选点。
+
+    返回 (下标数组, 切向单位向量, 偏僻度, **圈内相对位置**) ——
+    最后一项是 0 起算的"线在圈内哪个位置"，用来给用户列候选表。
 
     只在**最近一圈**的轨迹上撒点：轨迹本身会重复好几圈，多撒没有意义，
     而且会让 O(候选数 × 采样点数) 的计算量翻好几倍。
@@ -377,24 +512,16 @@ def _candidate_gates(
     norm = np.where(norm < 1e-9, 1e-9, norm)
     tangent = np.column_stack([tx / norm, ty / norm])
 
-    # ------------------------------------------------------------------
-    # 偏僻度：这个点离"同一圈里其它部分"的赛道最近有多远。
-    #
-    # 这里有个很容易踩的坑：如果把"时间上相隔较远"当作判据，那么**下一圈的同一个
-    # 位置**也会被算进来 —— 而它和当前点的距离本来就是 0（跑的是同一条线）。
-    # 正确做法是只看"同一圈内"的采样点，也就是时间差落在一个圈时之内。
-    # ------------------------------------------------------------------
-    clearance = np.zeros(idx.size, dtype=np.float64)
+    # 偏僻度：这个点离"同一圈里其它部分"的赛道最近有多远。见 _clearance_at()。
     span = lap_period * 0.85 if np.isfinite(lap_period) else t_hi - float(t[0])
-    for k, i in enumerate(idx):
-        lag = np.abs(t - t[i])
-        far = (lag > 3.0) & (lag < span)
-        if far.sum() < 5:
-            clearance[k] = 50.0  # 数据不足，给一个中性值
-            continue
-        clearance[k] = float(np.min(np.hypot(x[far] - x[i], y[far] - y[i])))
+    clearance = np.array(
+        [_clearance_at(tel, int(i), span) for i in idx], dtype=np.float64
+    )
 
-    return idx, tangent, clearance
+    # 圈内相对位置：dw 就是"相对被采样那一圈起点"的里程
+    along = np.interp(idx.astype(np.float64), idx_all.astype(np.float64), dw)
+
+    return idx, tangent, clearance, along
 
 
 def _crossings(tel: telemetry.Telemetry, px: float, py: float, direction: np.ndarray) -> np.ndarray:
@@ -459,18 +586,19 @@ def _crossings(tel: telemetry.Telemetry, px: float, py: float, direction: np.nda
     return t_cross[keep]
 
 
-def find_gate(
+def _passing_candidates(
     tel: telemetry.Telemetry,
     *,
-    spacing: float = 3.0,
-    max_cov: float = 0.25,
-    max_dist_cov: float = 0.12,
-    min_laps: int = 2,
-) -> Gate:
+    spacing: float,
+    max_cov: float,
+    max_dist_cov: float,
+    min_laps: int,
+    lap_period: float,
+) -> list[GateCandidate]:
     """
-    自动搜索最佳起终点线。
+    沿轨迹撒候选点，返回**通过三关检验**的那些（未合并、未排序）。
 
-    一个候选点要同时过三关才会被采用：
+    一个候选点要同时过三关才会被留下：
 
         1. **圈时合理**：每一圈都在 8~300 s 之间
         2. **圈时一致**：圈时的变异系数不超过 max_cov（默认 25%）
@@ -478,14 +606,10 @@ def find_gate(
 
     第 3 条是抓"门开在赛道自己旁边"最直接的判据 —— 一旦发生漏穿或多穿，
     算出来的每圈距离会变成半圈或两圈，离散度立刻爆掉。
-
-    最后在所有合格的候选里，先筛掉偏僻度不足的（避免误判），
-    再选"第一次过线最早"的那个，让第 1 圈尽量贴近录制起点。
     """
-    lap_period = _estimate_lap_period(tel)
-    idx, tangents, clearances = _candidate_gates(tel, spacing, lap_period)
+    idx, tangents, clearances, along = _candidate_gates(tel, spacing, lap_period)
+    out: list[GateCandidate] = []
 
-    candidates: list[tuple[float, float, int, np.ndarray, float]] = []
     for k in range(idx.size):
         i = int(idx[k])
         tc = _crossings(tel, tel.x[i], tel.y[i], tangents[k])
@@ -500,7 +624,6 @@ def find_gate(
             continue
         cov = float(np.std(durs) / d_mean)
 
-        # 每圈行驶距离是否一致
         bounds = np.clip(np.searchsorted(tel.t, tc), 0, tel.t.size - 1)
         dists = np.diff(tel.dist[bounds])
         if dists.size == 0 or float(np.mean(dists)) <= 1.0:
@@ -510,44 +633,233 @@ def find_gate(
         if cov > max_cov or dist_cov > max_dist_cov:
             continue
 
-        candidates.append((cov, dist_cov, i, tangents[k], float(clearances[k])))
+        lat, lon = geo.to_latlon(
+            np.array([tel.x[i]]), np.array([tel.y[i]]), tel.lat0, tel.lon0
+        )
+        out.append(
+            GateCandidate(
+                index=i,
+                x=float(tel.x[i]),
+                y=float(tel.y[i]),
+                lat=float(lat[0]),
+                lon=float(lon[0]),
+                direction=tangents[k],
+                clearance=float(clearances[k]),
+                first_cross=float(tc[0]),
+                n_laps=int(durs.size),
+                lap_cov=cov,
+                dist_cov=dist_cov,
+                distance_along=float(along[k]),
+                turn_deg=_turn_amount(tel, i),
+            )
+        )
+    return out
 
-    if not candidates:
+
+def _cand_order(c: GateCandidate) -> tuple[float, float]:
+    """候选排序依据：**先直道、再偏僻度**（都把 NaN 推到后面）。"""
+    return (float(np.nan_to_num(c.turn_deg, nan=999.0)), -float(c.clearance))
+
+
+def _merge_candidates(cands: list[GateCandidate], limit: int) -> list[GateCandidate]:
+    """
+    把靠得太近的候选合并成一条，按「**先直道、再偏僻度**」返回前 limit 条。
+
+    赛道上的起点线通常都放在**直道**上（裁判位、发车格都在直道边），
+    所以“这块直不直”比“离别的赛道部分有多远”更贴近实际习惯。
+    """
+    ordered = sorted(cands, key=_cand_order)
+    merged: list[GateCandidate] = []
+    for c in ordered:
+        if any(
+            float(np.hypot(c.x - m.x, c.y - m.y)) < GATE_MERGE_DISTANCE for m in merged
+        ):
+            continue
+        merged.append(c)
+    return merged[:limit] if limit > 0 else merged
+
+
+def _nearest_candidate(
+    gate: Gate, cands: list[GateCandidate]
+) -> tuple[int, GateCandidate] | None:
+    """
+    在候选表里找到离这条线最近的那一条（返回 (编号, 候选)，编号从 1 起）。
+
+    不能用"坐标完全相等"去找：自动搜索是在**未合并**的原始候选里挑的，
+    而候选表是合并后的，同一条线两边几乎不可能裁到同一个采样点。
+    所以用"距离小于合并阈值"判定为同一条。
+    """
+    best: tuple[int, GateCandidate] | None = None
+    for k, c in enumerate(cands, 1):
+        dist = float(np.hypot(c.x - gate.x, c.y - gate.y))
+        if dist < GATE_MERGE_DISTANCE and (best is None or dist < best[0]):
+            best = (k, c)
+    return best
+
+
+def _to_gate(c: GateCandidate, candidates: list[GateCandidate] | None = None) -> Gate:
+    """把选中的候选变成切圈用的 Gate。"""
+    return Gate(
+        x=c.x, y=c.y, lat=c.lat, lon=c.lon, direction=c.direction,
+        clearance=c.clearance, n_laps=c.n_laps, lap_cov=c.lap_cov,
+        score=c.score, gate_index=c.index,
+        candidates=list(candidates) if candidates else [],
+    )
+
+
+def search_gates(
+    tel: telemetry.Telemetry,
+    *,
+    spacing: float = 3.0,
+    max_cov: float = 0.25,
+    max_dist_cov: float = 0.12,
+    min_laps: int = 2,
+    limit: int = GATE_LIST_LIMIT,
+) -> list[GateCandidate]:
+    """
+    找出所有合格的候选起终点线，按**偏僻度从大到小**排列。
+
+    为什么按偏僻度排而不是按"自洽性得分"排：需要手动挑线的场合，通常就是自动选的
+    那条开在了赛道自己旁边（偏僻度低、同一圈会穿两次）。**偏僻度大的线才没有歧义**，
+    所以它才是用户要看的首要指标。
+
+    同处重复项已合并（见 `GATE_MERGE_DISTANCE`）。limit <= 0 表示不限制条数。
+    """
+    lap_period = _estimate_lap_period(tel)
+    cands = _passing_candidates(
+        tel, spacing=spacing, max_cov=max_cov, max_dist_cov=max_dist_cov,
+        min_laps=min_laps, lap_period=lap_period,
+    )
+    return _merge_candidates(cands, limit)
+
+
+def _gate_from_index(tel: telemetry.Telemetry, i: int) -> Gate:
+    """用轨迹上第 i 个采样点做起点线，方向取该点的切向（前后各 3 点中心差分）。"""
+    j = int(np.clip(i, 0, len(tel.x) - 1))
+    lo, hi = max(j - 3, 0), min(j + 3, len(tel.x) - 1)
+    d = np.array([tel.x[hi] - tel.x[lo], tel.y[hi] - tel.y[lo]])
+    n = float(np.linalg.norm(d))
+    d = d / n if n > 1e-9 else np.array([1.0, 0.0])
+    lat, lon = geo.to_latlon(
+        np.array([tel.x[j]]), np.array([tel.y[j]]), tel.lat0, tel.lon0
+    )
+    return Gate(
+        x=float(tel.x[j]), y=float(tel.y[j]), lat=float(lat[0]), lon=float(lon[0]),
+        direction=d, clearance=float("nan"), n_laps=0, lap_cov=float("nan"),
+        score=1.0, gate_index=j,
+    )
+
+
+def gate_by_time(tel: telemetry.Telemetry, seconds: float) -> Gate:
+    """
+    用"**视频第 N 秒车正好过线**"来指定起点线。
+
+    这是最容易上手的手动方式：在播放器里找到过线的那一帧，读一下时间就行，
+    完全不需要经纬度。位置取最接近该时刻的轨迹采样点，方向由轨迹自动取。
+
+    线可以在意的是**垂直方向**（车必须沿行进方向穿过才算一圈），
+    所以时间稍微差一点点没关系，差一两秒也还在赛道上同一个位置附近。
+    """
+    if not np.isfinite(seconds):
+        raise RuntimeError("--gate-time 需要一个有效的秒数。")
+    j = int(np.argmin(np.abs(tel.t - seconds)))
+    return _gate_from_index(tel, j)
+
+
+def gate_by_index(tel: telemetry.Telemetry, n: int, **kw) -> Gate:
+    """
+    按 `--list-gates` 里的编号挑一条候选线。
+
+    编号从 1 开始，顺序就是候选表的顺序（按偏僻度降序）。
+    选中的线会带上完整的候选表，方便提示"还有别的可选"。
+    """
+    cands = search_gates(tel, **kw)
+    if not cands:
+        raise RuntimeError(
+            "没有找到任何合格的候选起终点线。请先用 --list-streams 确认 GPS 数据正常。"
+        )
+    if not 1 <= n <= len(cands):
+        raise RuntimeError(
+            f"编号 {n} 超出范围：本次只找到 {len(cands)} 条候选线（1~{len(cands)}）。"
+            "先用 --list-gates 看一下有哪些。"
+        )
+    return _to_gate(cands[n - 1], cands)
+
+
+def gate_by_latlon(tel: telemetry.Telemetry, lat: float, lon: float) -> Gate:
+    """用经纬度指定起点线（从赛道图上读坐标时用）。"""
+    gx, gy, _, _ = geo.to_local_xy(
+        np.array([lat]), np.array([lon]), tel.lat0, tel.lon0
+    )
+    j = int(np.argmin(np.hypot(tel.x - gx[0], tel.y - gy[0])))
+    gate = _gate_from_index(tel, j)
+    # 保留用户输入的经纬度原值（描述里要显示他填的那个，而不是最近点的）
+    gate.lat, gate.lon = float(lat), float(lon)
+    return gate
+
+
+def _fill_gate_quality(
+    tel: telemetry.Telemetry, gate: Gate, crossing_times: np.ndarray
+) -> None:
+    """
+    用**实际过线时刻**补全门的质量指标。
+
+    自动搜索出来的门本来就带这些数字；手动指定的门只有位置，不补的话用户
+    根本不知道自己选的那条线切出来的圈速自不自洽 —— 而这恰恰是判断
+    "线选对没有"最直接的依据。
+    """
+    durs = np.diff(crossing_times)
+    gate.n_laps = int(durs.size)
+    if durs.size:
+        mean = float(np.mean(durs))
+        gate.lap_cov = float(np.std(durs) / mean) if mean > 0 else float("nan")
+    if not np.isfinite(gate.clearance):
+        span = float(np.mean(durs)) * 0.85 if durs.size else tel.t[-1] - tel.t[0]
+        gate.clearance = _clearance_at(tel, gate.gate_index, span)
+
+
+def find_gate(
+    tel: telemetry.Telemetry,
+    *,
+    spacing: float = 3.0,
+    max_cov: float = 0.25,
+    max_dist_cov: float = 0.12,
+    min_laps: int = 2,
+) -> Gate:
+    """
+    自动搜索最佳起终点线。
+
+    从所有通过三关检验的候选里，先筛掉偏僻度不足的（避免误判），
+    再选"第一次过线最早"的那个，让第 1 圈尽量贴近录制起点。
+
+    选中的门会带上完整候选表（`gate.candidates`），供上层提示用户
+    "不满意的话可以换哪一条"。
+    """
+    lap_period = _estimate_lap_period(tel)
+    cands = _passing_candidates(
+        tel, spacing=spacing, max_cov=max_cov, max_dist_cov=max_dist_cov,
+        min_laps=min_laps, lap_period=lap_period,
+    )
+
+    if not cands:
         raise RuntimeError(
             "没能找到合适的起终点线。可能是：\n"
             "  · 本次录制里连续完成的有效圈数不足 2 圈\n"
             "  · GPS 信号质量太差（室内 / 被建筑遮挡 / 起步阶段还没搜到星）\n"
             "  · 车辆在赛道上长时间停车或多次出场进场\n"
-            "可以试试用 --gate 纬度,经度 手动指定赛道上的一个位置。"
+            "可以试试用 --list-gates 看看有哪些候选位置，"
+            "或用 --gate-time 秒 手动指定过线时刻。"
         )
 
     # 偏僻度筛选：门开在赛道自己旁边的话，同一圈会穿过两次，圈速必然算错
-    max_clear = max(c[4] for c in candidates)
+    max_clear = max(c.clearance for c in cands)
     floor = max(0.55 * max_clear, GATE_HALF_WIDTH + 2.0)
-    safe = [c for c in candidates if c[4] >= floor] or candidates
+    safe = [c for c in cands if c.clearance >= floor] or cands
+    # 在偏僻度达标的前提下优先选**转弯量最小**的（起点线常规放直道），
+    # 同样笔直时再取过线最早的 —— 让第 1 圈尽量贴近录制起点。
+    safe.sort(key=lambda c: (float(np.nan_to_num(c.turn_deg, nan=999.0)), c.first_cross))
 
-    def _first_cross(c: tuple) -> float:
-        tc = _crossings(tel, tel.x[c[2]], tel.y[c[2]], c[3])
-        return float(tc[0]) if tc.size else float("inf")
-
-    safe.sort(key=_first_cross)
-    cov, dist_cov, i, tangent, clear = safe[0]
-
-    tc = _crossings(tel, tel.x[i], tel.y[i], tangent)
-    lat, lon = geo.to_latlon(np.array([tel.x[i]]), np.array([tel.y[i]]), tel.lat0, tel.lon0)
-
-    return Gate(
-        x=float(tel.x[i]),
-        y=float(tel.y[i]),
-        lat=float(lat[0]),
-        lon=float(lon[0]),
-        direction=tangent,
-        clearance=clear,
-        n_laps=int(np.diff(tc).size),
-        lap_cov=cov,
-        score=1.0 / (1.0 + cov + dist_cov),
-        gate_index=i,
-    )
+    return _to_gate(safe[0], _merge_candidates(cands, GATE_LIST_LIMIT))
 
 
 # ==========================================================================
@@ -741,46 +1053,46 @@ def compute_lapset(
     *,
     gate: Gate | None = None,
     gate_latlon: tuple[float, float] | None = None,
+    gate_time: float | None = None,
+    gate_index: int | None = None,
     sectors: int = 3,
     grid_step: float = 1.0,
     verbose: bool = True,
 ) -> LapSet:
     """
     完整的切圈流程：找起终点线 → 切圈 → 算分段 → 重采样到统一网格。
+
+    起点线有四种来源，优先级从高到低（一般只用其中一种）：
+        gate        直接给一个 Gate 对象（测试用）
+        gate_latlon 给经纬度（从赛道图上读坐标）
+        gate_time   给"视频第 N 秒过线"（最容易上手）
+        gate_index  给候选表里的编号（先用 --list-gates 看有哪些）
+    都不给就自动搜索。
     """
-    if gate is None and gate_latlon is not None:
-        lat, lon = gate_latlon
-        gx, gy, _, _ = geo.to_local_xy(np.array([lat]), np.array([lon]), tel.lat0, tel.lon0)
-        # 方向取轨迹上最近点的切向
-        j = int(np.argmin(np.hypot(tel.x - gx[0], tel.y - gy[0])))
-        lo, hi = max(j - 3, 0), min(j + 3, len(tel.x) - 1)
-        d = np.array([tel.x[hi] - tel.x[lo], tel.y[hi] - tel.y[lo]])
-        n = np.linalg.norm(d)
-        d = d / n if n > 1e-9 else np.array([1.0, 0.0])
-        gate = Gate(
-            x=float(gx[0]), y=float(gy[0]), lat=lat, lon=lon, direction=d,
-            clearance=float("nan"), n_laps=0, lap_cov=float("nan"), score=1.0, gate_index=j,
-        )
-    elif gate is None:
-        gate = find_gate(tel)
+    if gate is None:
+        if gate_latlon is not None:
+            gate = gate_by_latlon(tel, gate_latlon[0], gate_latlon[1])
+        elif gate_time is not None:
+            gate = gate_by_time(tel, gate_time)
+        elif gate_index is not None:
+            gate = gate_by_index(tel, gate_index)
+        else:
+            gate = find_gate(tel)
 
     crossing_times = _crossings(tel, gate.x, gate.y, gate.direction)
     if crossing_times.size < 2:
         raise RuntimeError(
-            "在选定的起终点线处只检测到不到 2 次过线，无法计算圈速。"
-            "请用 --gate 纬,经 手动指定一个赛道上的位置。"
+            "在选定的起终点线处只检测到不到 2 次过线，无法计算圈速。\n"
+            "  · 用 --gate-time 秒 换个「车确实在赛道上行驶」的时刻试试\n"
+            "  · 或用 --list-gates 挑一条候选线（--gate-index N）\n"
+            "  · 注意车必须沿**行进方向**穿过这条线才算一圈，倒车回去不算"
         )
 
+    # 手动指定的门只有位置，在这里用实际过线时刻补全质量指标 ——
+    # 用户需要靠这些数字判断「自己选的这条线到底对不对」
+    _fill_gate_quality(tel, gate, crossing_times)
+
     grid, laps, out_lap = _build_grid(tel, gate, crossing_times, grid_step)
-    if gate.clearance is None or not np.isfinite(gate.clearance):
-        gate = Gate(
-            x=gate.x, y=gate.y, lat=gate.lat, lon=gate.lon, direction=gate.direction,
-            clearance=float("nan"), n_laps=len(laps),
-            lap_cov=float(np.std([l.duration for l in laps]) / np.mean([l.duration for l in laps])),
-            score=1.0, gate_index=gate.gate_index,
-        )
-    else:
-        gate.n_laps = len(laps)
 
     # 分段边界按网格的实际覆盖长度来定，保证和上面的距离对齐一致
     step = float(grid[1] - grid[0]) if grid.size > 1 else grid_step
@@ -793,6 +1105,13 @@ def compute_lapset(
     if verbose:
         print("\n— 圈速分析 —")
         print(gate.describe())
+        if len(gate.candidates) > 1:
+            hit = _nearest_candidate(gate, gate.candidates)
+            rank = hit[0] if hit is not None else 0
+            where = f"排第 {rank}/{len(gate.candidates)}" if rank else "未列入候选表"
+            print(f"  本条线的来源 : 自动搜索（在候选表里{where}）")
+            print("  不满意？可以用 --list-gates 看全部候选，"
+                  "再用 --gate-index N 换一条，或用 --gate-time 秒 自己指定过线时刻。")
 
     return LapSet(
         gate=gate,
@@ -807,11 +1126,17 @@ def compute_lapset(
 
 __all__ = [
     "GATE_HALF_WIDTH",
+    "GATE_LIST_LIMIT",
     "Gate",
+    "GateCandidate",
     "Lap",
     "LapSet",
     "compute_lapset",
     "find_gate",
     "format_delta",
     "format_lap_time",
+    "gate_by_index",
+    "gate_by_latlon",
+    "gate_by_time",
+    "search_gates",
 ]
