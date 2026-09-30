@@ -77,6 +77,16 @@ _TEMPLATE = r"""<!DOCTYPE html>
         padding:11px 14px;border-radius:8px;font-size:12.5px;margin-bottom:16px;line-height:1.7;}
   .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;
         background:#232a33;color:var(--dim);margin-left:6px;}
+  /* 静态图表：直接嵌图，点开看原图 */
+  .gallery{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+           gap:14px;margin-top:4px;}
+  .gallery figure{margin:0;background:var(--card);border:1px solid var(--line);
+                  border-radius:10px;overflow:hidden;}
+  .gallery img{display:block;width:100%;height:auto;background:#fff;}
+  .gallery a{line-height:0;}
+  .gallery figcaption{padding:7px 10px;font-size:12px;color:var(--dim);
+                      border-top:1px solid var(--line);}
+
   /* “其他文件”区块：指向 charts/ 与 tables/ 里的产物 */
   section h3{margin:15px 0 7px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.4px;}
   section h3:first-of-type{margin-top:4px;}
@@ -142,6 +152,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="scroll"><table id="tLap"></table></div>
   </section>
 
+__GALLERY__
 __FILES__</div>
 
 <script>
@@ -472,6 +483,38 @@ _TABLE_FILES = [
 ]
 
 
+def _chart_gallery(outdir: Path) -> str:
+    """
+    把 `charts/` 里的静态图直接嵌进页面。
+
+    为什么要嵌而不是只留页尾链接：这一页的定位是"分析的入口"，打开就该看到全部
+    结论。而页尾那串链接长得像"附件清单"，很容易被当成"图不在这里"而忽略掉
+    （用户反馈原话：没有在 html 中看到）。
+
+    只嵌磁盘上**确实存在**的图，所以 `--no-charts` 时整块自动消失，不留破图。
+    """
+    figs = [
+        (name, desc) for name, desc in _CHART_FILES
+        if (outdir / "charts" / name).exists()
+    ]
+    if not figs:
+        return ""
+    items = "".join(
+        f'<figure><a href="charts/{name}" target="_blank" rel="noopener">'
+        f'<img src="charts/{name}" alt="{desc}" loading="lazy"></a>'
+        f"<figcaption>{desc}</figcaption></figure>"
+        for name, desc in figs
+    )
+    return (
+        "  <section>\n"
+        "    <h2>静态图表</h2>\n"
+        '    <p class="hint">上面几节是可以交互的；这几张是导出好的大图，'
+        "点任意一张可以看原图（也可以直接拿去发）。</p>\n"
+        f'    <div class="gallery">{items}</div>\n'
+        "  </section>\n"
+    )
+
+
 def _file_index(outdir: Path) -> str:
     """
     生成页尾的"其他文件"区块。
@@ -700,6 +743,7 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16, poi
         .replace("__DIST__", f"{float(t.dist[-1]):.0f}" if t else "—")
         .replace("__DATE__", __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"))
         .replace("__FILES__", _file_index(path.parent))
+        .replace("__GALLERY__", _chart_gallery(path.parent))
     )
     path.write_text(html, encoding="utf-8")
 
