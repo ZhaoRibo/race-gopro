@@ -322,6 +322,23 @@ def render_hud_frame(
                font=fonts.get(px(34)), fill=_DIM, anchor="rb")
 
     # ------------------------------------------------------------------
+    # 下方两个仪表的公共几何
+    # ------------------------------------------------------------------
+    # 纵向 G 条和 G-G 圆盘要看起来像一套：条高 = 圆盘直径，上下也和圆盘对齐；
+    # 两个标签共用同一条基线，两个数值也统一字号。改这里两边一起变。
+    r = px(96)
+    cx, cy = px(430), H - px(196)
+    bar_w = px(60)
+    bar_h = 2 * r                              # 与圆盘直径等高
+    bx = px(60)
+    by = cy - r                                # 条的上下与圆盘对齐
+    mid = by + bar_h / 2
+    half = bar_h / 2
+    lab_sans = fonts.get(px(30))               # 标签字号（两处一致）
+    lab_num = fonts.get(px(30), mono=True)     # 数值字号（两处一致）
+    lab_y = cy - r - px(74)                    # 两个标签共用这条基线
+
+    # ------------------------------------------------------------------
     # 左下：纵向 G 指示条
     # ------------------------------------------------------------------
     # 【这里原本是“油门 / 刹车”，为什么会失真】
@@ -329,17 +346,13 @@ def render_hud_frame(
     # 硬换算出来的，而车体系纵向加速度里混着一项 -v·ω·sinβ（卡丁车漂移时
     # 能到 ±0.8 g），与油门刹车毫无关系 —— 弯中明明在加油，读数却在乱跳。
     # 换成直接显示纵向 G 本身：这是真实测到的量，不会骗人。
-    bar_w = px(60)
-    bar_h = px(260)
-    bx, by = px(60), H - px(360)
-    mid = by + bar_h / 2
-    half = bar_h / 2
-    d.text((bx, by - px(44)), "纵向 G", font=fonts.get(px(26)), fill=_DIM)
-    d.text((bx + px(300), by - px(44)),
+    d.text((bx, lab_y), "纵向G", font=lab_sans, fill=_DIM, anchor="ls")
+    # 数值落在「纵向G」和指示条之间的空当里，字号跟横向那个数值一致
+    d.text((bx, lab_y + px(46)),
            f"{a_long:+.2f} g" if np.isfinite(a_long) else "-- g",
-           font=fonts.get(px(44), mono=True),
+           font=lab_num,
            fill=(_GREEN if a_long >= 0 else _RED) if np.isfinite(a_long) else _DIM,
-           anchor="ra")
+           anchor="ls")
 
     d.rounded_rectangle([bx, by, bx + bar_w, by + bar_h], radius=px(10),
                         fill=(255, 255, 255, 34))
@@ -357,8 +370,8 @@ def render_hud_frame(
     # ------------------------------------------------------------------
     # 中下：G-G 圆盘（局部超采样，保证圆和点平滑）
     # ------------------------------------------------------------------
-    r = px(96)
-    cx, cy = px(430), H - px(196)
+    # r / cx / cy / lab_* 都在上面的「公共几何」里定好了，跟纵向 G 那条共用
+    #
     # 圆盘用两个方向的**共同**量程：摩擦圆的形状要求两轴等标尺，
     # 这是它存在的意义（看得出“刹车 + 转向”的合力能不能吃满抓地力）。
     g_max = max(g_lat_max, g_long_max)
@@ -401,8 +414,7 @@ def render_hud_frame(
     # 而纵向那一半藏着不看就丢了（用户反馈的正是这个问题）。
     # 「横向」用中文字体、数字用等宽字体分开画：等宽字体不含中文字形，
     # 混在一串里会把中文变成豆腐块；而数字用等宽才能在跳动时不左右飘。
-    y_lab = cy - r - px(52)
-    lab_sans, lab_num = fonts.get(px(30)), fonts.get(px(30), mono=True)
+    y_lab = lab_y
     txt_lat = "横向"
     txt_num = f" {a_lat:+.2f} g" if np.isfinite(a_lat) else " -- g"
     w_lat = d.textlength(txt_lat, font=lab_sans)
