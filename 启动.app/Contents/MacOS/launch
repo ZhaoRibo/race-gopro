@@ -1,0 +1,82 @@
+#!/bin/sh
+# 双击「启动.app」真正执行的就是这个脚本。
+#
+# 为什么用 .app 而不是 .command —— 踩过的坑，别再改回去：
+#
+# .command 是让「终端」开个窗口、用你的**登录 shell**把文件路径"敲"进去执行。
+# 而 oh-my-zsh 启动时会打印
+#     [oh-my-zsh] Would you like to update? [Y/n]
+# 并用 read -k 1 读**一个字符**。两个东西撞在一起：那句提示把路径开头的 `/`
+# 当成自己的回答吃掉了，剩下的 `Users/zhaoruibo/...` 成了相对路径，
+# 于是报 `zsh: no such file or directory: Users/...`。
+# （实测复现：`open -a Terminal 启动.command` 必现，和双击等价。）
+#
+# .app 由系统（LaunchServices）直接执行这个文件，不经过终端、不经过 zsh、
+# 没有任何交互 —— 没这个问题，顺带也没有多余的终端窗口了。
+#
+# 日志写在仓库根的 .race-gopro.log；出问题会弹对话框告诉你。
+
+set -u
+
+# 启动.app/Contents/MacOS → 上三级就是仓库根
+here=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P) || exit 1
+cd "$here" || exit 1
+
+name="卡丁车遥测分析"
+log="$here/.race-gopro.log"
+
+# 把一段文字用对话框显示出来。AppleScript 的字符串里 \\ 和 " 要转义。
+say() {
+  /usr/bin/osascript -e \
+    "display dialog \"$(printf '%s' "$1" | /usr/bin/sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')\" \
+buttons {\"好\"} default button 1 with title \"$name\" with icon caution" >/dev/null 2>&1
+}
+
+if [ ! -f analyze.py ]; then
+  say "找不到程序本体（analyze.py）。
+请把「启动.app」放回 race-gopro 文件夹里，再双击它。"
+  exit 1
+fi
+
+if [ -x .venv/bin/python ]; then
+  PY=.venv/bin/python
+elif command -v python3 >/dev/null 2>&1; then
+  PY=python3
+  say "没找到项目自带的运行环境 .venv，先用系统的 python3 试试。
+依赖可能不全。要装的话，在仓库目录里执行：
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+else
+  say "没找到 Python。
+先装一个：https://www.python.org/downloads/
+装完在仓库目录里执行：
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+  exit 1
+fi
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  say "没找到 ffmpeg —— 读视频、出片都要靠它。
+在终端里执行一次：brew install ffmpeg"
+  exit 1
+fi
+
+{
+  echo "──────────────────────────────────────────────"
+  echo "启动时间：$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "仓库目录：$here"
+  echo "解释器：  $PY"
+} >>"$log"
+
+# 标准输出同时进日志（网页上的进度也是从同一份来的）
+"$PY" -m rapp.app "$@" >>"$log" 2>&1
+code=$?
+
+if [ "$code" -eq 0 ]; then
+  echo "正常退出（$code）" >>"$log"
+  exit 0
+fi
+
+echo "异常退出（$code）" >>"$log"
+say "程序退出了（退出码 $code）。
+原因写在日志里，可以用「控制台」打开看：
+$log"
+exit "$code"
