@@ -152,6 +152,18 @@ _TEMPLATE = r"""<!DOCTYPE html>
     __CARDS__
   </div>
 
+  <!-- 赛道俯视图放在最前面：先定下计时线位置，再去选「显示哪几圈」才有意义 -->
+  <section>
+    <h2>赛道俯视图</h2>
+    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>在图上点一下可以直接挪计时线</b> —— 点完按「用这条线重算」，整场会重新切圈，圈速/图表/看板一起刷新。</p>
+    <div class="chartbox wide-square"><canvas id="cMap"></canvas></div>
+    <div class="gatebar">
+      <span class="gaterange" id="gateMsg"></span>
+      <button class="primary" id="gateApply" type="button" disabled>用这条线重算</button>
+      <button id="gateReset" type="button">恢复自动</button>
+    </div>
+  </section>
+
   <section class="picker" id="picker" hidden>
     <div class="row">
       <h2>选择要显示的圈</h2>
@@ -203,17 +215,6 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <h2>G-G 图（摩擦圆）</h2>
     <p class="hint">横轴 = 横向 G（左转为正），纵轴 = 纵向 G（加速为正）。两轴等比例，散点围出的外沿就是这条轮胎的抓地力极限。</p>
     <div class="chartbox square"><canvas id="cGG"></canvas></div>
-  </section>
-
-  <section>
-    <h2>赛道俯视图</h2>
-    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>在图上点一下可以直接挪计时线</b> —— 点完按「用这条线重算」，整场会重新切圈，圈速/图表/看板一起刷新。</p>
-    <div class="chartbox wide-square"><canvas id="cMap"></canvas></div>
-    <div class="gatebar">
-      <span class="gaterange" id="gateMsg"></span>
-      <button class="primary" id="gateApply" type="button" disabled>用这条线重算</button>
-      <button id="gateReset" type="button">恢复自动</button>
-    </div>
   </section>
 
   <section>
