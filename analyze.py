@@ -146,7 +146,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p.add_argument("--serve", action="store_true",
                    help="跑完不退出，把看板挂到本地端口上：这样在看板里能选中某一圈"
-                        "一键生成 HUD 视频（浏览器的沙箱里调不了 ffmpeg，必须有这个服务）")
+                        "一键生成 HUD 视频、也能拖滑动条改起点线（浏览器的沙箱里调不了"
+                        "ffmpeg，这两个功能都必须有这个服务）")
     p.add_argument("--serve-port", type=int, default=8765, metavar="N",
                    help="本地服务端口，默认 8765")
 

@@ -118,6 +118,19 @@ _TEMPLATE = r"""<!DOCTYPE html>
   .gaterange b{color:var(--fg);}
   .gaterange .ok{color:#3fb950;}
   .gaterange .bad{color:#f0c674;}
+
+  /* 起点线滑动条 + 对应那一帧的画面 */
+  .gateslider{display:flex;align-items:center;gap:10px;margin-top:14px;flex-wrap:wrap;}
+  .gateslider label{color:var(--dim);font-size:12.5px;white-space:nowrap;}
+  .gateslider input[type=range]{flex:1 1 160px;min-width:120px;accent-color:var(--accent);
+        cursor:pointer;height:22px;}
+  .gateslider input[type=range]:disabled{cursor:not-allowed;opacity:.45;}
+  .gateslider .gaterange{min-width:168px;}
+  .gateview{margin-top:11px;}
+  .gateview img{display:none;width:100%;border:1px solid var(--line);
+        border-radius:9px;background:#0b0e13;}
+  .gateview img.on{display:block;}
+  .gateview p{margin:7px 0 0;color:var(--dim);font-size:11.5px;line-height:1.65;}
   .hudbar{height:6px;background:#232a33;border-radius:4px;overflow:hidden;margin-top:11px;}
   .hudbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .4s;}
   .hudmsg{margin:9px 0 0;font-size:12.5px;color:var(--dim);line-height:1.75;}
@@ -155,11 +168,24 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <!-- 赛道俯视图放在最前面：先定下计时线位置，再去选「显示哪几圈」才有意义 -->
   <section>
     <h2>赛道俯视图</h2>
-    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>在图上点一下可以直接挪计时线</b> —— 点完按「用这条线重算」，整场会重新切圈，圈速/图表/看板一起刷新。</p>
+    <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>用下面的滑动条找到车压过发车线的那一瞬间，看画面确认，再点「用这一帧当起点线」</b> —— 整场会重新切圈，圈速/图表/看板一起刷新。</p>
     <div class="chartbox wide-square"><canvas id="cMap"></canvas></div>
+
+    <div class="gateslider">
+      <label for="gateT">起点线在视频的第</label>
+      <input type="range" id="gateT" min="0" max="0" step="0.01" value="0" disabled>
+      <span class="gaterange" id="gateTime">—</span>
+      <button class="mini" id="gatePrev" type="button" title="上一帧（←）">‹ 一帧</button>
+      <button class="mini" id="gateNext" type="button" title="下一帧（→）">一帧 ›</button>
+    </div>
+    <div class="gateview">
+      <img id="gateShot" alt="起点线所在那一帧的画面">
+      <p id="gateShotHint">拖动滑动条，或用鼠标点一下滑动条后按 ← → 逐帧微调（按住 Shift 是 1 秒），这里会显示那一瞬间的画面。</p>
+    </div>
+
     <div class="gatebar">
       <span class="gaterange" id="gateMsg"></span>
-      <button class="primary" id="gateApply" type="button" disabled>用这条线重算</button>
+      <button class="primary" id="gateApply" type="button" disabled>用这一帧当起点线</button>
       <button id="gateReset" type="button">恢复自动</button>
     </div>
   </section>
@@ -736,20 +762,18 @@ new Chart(document.getElementById("cMap"), {
     data: map.gate.map(p => ({x: p[0], y: p[1]})),
     borderColor: "#ffffff", borderWidth: 2.5, pointRadius: 0, fill: false
   }, {
-    label: "新计时线",
+    label: "候选计时线",
     type: "line",
     data: [],
     borderColor: "#22d3ee", borderWidth: 3, pointRadius: 0, fill: false
   }]},
   options: {
     responsive: true, maintainAspectRatio: false,
-    // 点一下就把候选计时线放到那个位置（见下面的 gatePick）
-    onClick: (evt, _els, chart) => gatePick(evt, chart),
     plugins: {
       legend: {labels: {boxWidth: 14, boxHeight: 3, font: {size: 11}}},
       tooltip: {callbacks: {label: c => c.datasetIndex === 0
         ? c.raw.s.toFixed(1) + " km/h"
-        : (c.datasetIndex === 1 ? "当前计时线" : "新计时线")}}
+        : (c.datasetIndex === 1 ? "当前计时线" : "候选计时线")}}
     },
     scales: {
       x: {min: mapCx - mapHalf, max: mapCx + mapHalf,
@@ -760,79 +784,154 @@ new Chart(document.getElementById("cMap"), {
   }
 });
 
-// ---------- 手动改计时线 ----------
-// 在赛道图上点一下选位置 —— 服务端会把这个坐标吸附到最近的采样点，
-// 并按那一点的行驶方向定过线方向（见 rapp/laps.py 的 gate_by_xy）。
-// 这里先画一条预览线，让用户看清楚切在哪儿、垂不垂直。
+// ---------- 手动改计时线：滑到"车压过发车线"的那一瞬间 ----------
+// 为什么不用"在赛道图上点一下"：图上点的那一下和"视频里哪一刻"是两回事，
+// 而且一像素就代表好几米，很难点准。换成拖时间轴之后，判断依据变成了**画面** ——
+// 看一眼就知道车有没有压到线，而这恰恰是"起点线"的定义。
+// 位置不用前端自己估：时间交给服务端反查（rapp/laps.py 的 gate_by_time），
+// 它会吸附到最近的遥测采样点、用车的实际走向定过线方向，再把结果发回来。
 (function gateMaker(){
   const msg = document.getElementById("gateMsg");
+  const slider = document.getElementById("gateT");
+  const timeEl = document.getElementById("gateTime");
+  const shot = document.getElementById("gateShot");
+  const shotHint = document.getElementById("gateShotHint");
   const applyBtn = document.getElementById("gateApply");
   const resetBtn = document.getElementById("gateReset");
-  if (!msg) return;
+  const prevBtn = document.getElementById("gatePrev");
+  const nextBtn = document.getElementById("gateNext");
+  const mapChart = Chart.getChart("cMap");
+  if (!msg || !slider || !mapChart) return;
+
+  // 当前计时线的中点，用来算"新位置离它多远" —— 挪了十几米还是一百多米，
+  // 一眼就知道自己是不是点错了地方。
+  const curX = (map.gate[0][0] + map.gate[1][0]) / 2;
+  const curY = (map.gate[0][1] + map.gate[1][1]) / 2;
 
   let server = null;      // ping 通了才有值
-  let picked = null;      // 选中的位置（投影坐标，米）
-  let busy = false;
+  let fps = 30, dur = 0;
+  let want = null;        // 滑动条最后停在哪一刻
+  let inflight = false;   // 有一次取画面还在路上
+  let busy = false;       // 正在重算
 
   const say = html => { msg.innerHTML = html; };
+  const fmt = t => {
+    const m = Math.floor(t / 60), s = t - m * 60;
+    return m + ":" + (s < 10 ? "0" : "") + s.toFixed(3);
+  };
+  const showTime = () => {
+    const t = slider.valueAsNumber;
+    timeEl.innerHTML = "<b>" + fmt(t) + "</b>（第 " + Math.round(t * fps) + " 帧）";
+  };
 
-  window.gatePick = null;
+  function render(j) {
+    shot.src = "data:image/jpeg;base64," + j.jpg;
+    shot.classList.add("on");
+    shotHint.textContent = "画面是第 " + j.frame + " 帧（" + fmt(j.t) + "）；"
+      + "对应的赛道位置取自最近的遥测点 " + fmt(j.snap_t) + "。";
+    const d = Math.hypot(j.x - curX, j.y - curY);
+    if (d > 2000) {
+      // 起步那几秒 GNSS 常常还没定位，位置会飘到十万八千里去
+      mapChart.data.datasets[2].data = [];
+      mapChart.update("none");
+      say('<span class="bad">这一刻遥测里没有有效定位</span>（取的位置离赛道太远），换个时刻再试。');
+      return;
+    }
+    mapChart.data.datasets[2].data = j.line.map(p => ({x: p[0], y: p[1]}));
+    mapChart.update("none");
+    say("已选 " + fmt(j.t) + "，距当前计时线 <b>" + d.toFixed(0) + " 米</b>"
+        + (d < 3 ? "（基本还是现在这条线）" : "")
+        + "。点「用这一帧当起点线」重算整场。");
+  }
+
+  // 拖动时一秒能发几十次 input，但取一帧要小半秒 —— 全发出去只会排成长队，
+  // 画面越拖越滞后。所以同一时刻只留一个请求在飞，中间的位置直接覆盖掉，
+  // 保证最后停下时看到的一定是最后一次停留的那一刻。
+  function pump() {
+    if (inflight || want === null) return;
+    inflight = true;
+    const t = want;
+    fetch("api/frame?t=" + t.toFixed(4), {cache: "no-store"})
+      .then(r => r.json())
+      .then(j => {
+        inflight = false;
+        if (j.error) { say('<span class="bad">取画面失败：</span>' + j.error); return; }
+        render(j);
+        if (want !== t) pump();          // 拖到别处了，接着取新的
+      })
+      .catch(() => {
+        inflight = false;
+        say('<span class="bad">取画面发不出去</span>，检查本地服务还在不在。');
+      });
+  }
+
+  function setT(t, byUser) {
+    want = Math.max(0, Math.min(dur, t));
+    slider.value = String(want);
+    want = slider.valueAsNumber;            // 读回浏览器按 step 吸附后的值
+    if (!isFinite(want)) want = 0;
+    showTime();
+    if (byUser) applyBtn.disabled = false;
+    pump();
+  }
 
   fetch("api/ping", {cache: "no-store"})
     .then(r => r.json())
     .then(info => {
       server = info;
+      fps = info.fps || 30;
+      dur = info.duration || 0;
+      slider.min = "0";
+      slider.max = String(dur);
+      slider.step = String(1 / fps);        // 一格 = 一帧
+      slider.disabled = false;
       resetBtn.disabled = false;
-      say("在图上点一下选新位置。「恢复自动」可以退回自动搜到的那条线。");
+      // 画面按服务端给的原宽度显示，别放大（放大了只是糊）
+      if (info.frame_width) shot.style.maxWidth = info.frame_width + "px";
+      say("这是<b>当前计时线</b>所在的那一瞬间。滑动滑动条，找到车压过发车线的画面。");
+      setT(info.gate_t || 0, false);
     })
     .catch(() => {
       server = null;
+      slider.disabled = true;
       applyBtn.disabled = true;
       resetBtn.disabled = true;
+      prevBtn.disabled = nextBtn.disabled = true;
       say('<span class="bad">改计时线需要本地服务</span>：'
           + "用 <b>analyze.py 视频.MP4 --serve</b> 起一次，再从 http://127.0.0.1:8765/ 打开。");
     });
 
-  // 供图表 onClick 调用（挂在 window 上，跟图表的创建顺序无关）
-  window.gatePick = function (evt, chart) {
-    if (!server || busy) return;
-    const x = chart.scales.x.getValueForPixel(evt.x);
-    const y = chart.scales.y.getValueForPixel(evt.y);
-    if (!isFinite(x) || !isFinite(y)) return;
+  slider.addEventListener("input", () => setT(slider.valueAsNumber, true));
 
-    // 吸附到赛道上最近的一点
-    let best = 0, bestD = Infinity;
-    for (let i = 0; i < map.x.length; i++) {
-      const d = (map.x[i] - x) ** 2 + (map.y[i] - y) ** 2;
-      if (d < bestD) { bestD = d; best = i; }
-    }
-    // 用前后各 5 个点估一下这一点的走向，法向就是计时线方向
-    const i0 = Math.max(0, best - 5), i1 = Math.min(map.x.length - 1, best + 5);
-    let tx = map.x[i1] - map.x[i0], ty = map.y[i1] - map.y[i0];
-    const tl = Math.hypot(tx, ty) || 1;
-    tx /= tl; ty /= tl;
-    const nx = -ty, ny = tx, half = 14;
-    const gx = map.x[best], gy = map.y[best];
+  // 方向键逐帧。全部自己处理再 preventDefault，免得浏览器也挪一次。
+  // Shift 是 1 秒（60 帧），PageUp/PageDown 是 10 秒，Home/End 到两头。
+  slider.addEventListener("keydown", e => {
+    const sec = e.shiftKey ? 1 : 1 / fps;
+    let d = 0;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") d = -sec;
+    else if (e.key === "ArrowRight" || e.key === "ArrowUp") d = sec;
+    else if (e.key === "PageDown") d = -10;
+    else if (e.key === "PageUp") d = 10;
+    else if (e.key === "Home") d = -dur;
+    else if (e.key === "End") d = dur;
+    else if (e.key === "Enter") { e.preventDefault(); applyBtn.click(); return; }
+    else return;
+    e.preventDefault();
+    setT(slider.valueAsNumber + d, true);
+  });
 
-    chart.data.datasets[2].data = [
-      {x: gx - nx * half, y: gy - ny * half},
-      {x: gx + nx * half, y: gy + ny * half}
-    ];
-    chart.update("none");
-    picked = {x: gx, y: gy};
-    applyBtn.disabled = false;
-    say("已选好位置，点「用这条线重算」。会重新切圈，图表和看板全部刷新（几秒）。");
-  };
+  prevBtn.addEventListener("click", () => { setT(slider.valueAsNumber - 1 / fps, true); slider.focus(); });
+  nextBtn.addEventListener("click", () => { setT(slider.valueAsNumber + 1 / fps, true); slider.focus(); });
 
   applyBtn.addEventListener("click", () => {
-    if (!picked || !server || busy) return;
+    if (!server || busy) return;
     busy = true;
     applyBtn.disabled = resetBtn.disabled = true;
-    say("正在用新计时线重算…");
+    say("正在用「" + fmt(slider.valueAsNumber) + "」这一刻的位置重算整场…");
     fetch("api/gate", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(picked)
+      body: JSON.stringify({t: slider.valueAsNumber})
     })
       .then(r => r.json())
       .then(j => {

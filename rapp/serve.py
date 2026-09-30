@@ -19,12 +19,13 @@
 
 接口（都在 /api/ 下）：
     GET  /api/ping               探活。看板用它判断按钮能不能用
+    GET  /api/frame?t=454.0      取「视频第 454 秒」那一帧的缩略图 + 对应的赛道位置
     POST /api/hud   {"lap": 8}    开始生成第 8 圈的 HUD，返回任务号
     POST /api/hud   {"full": true} 整段视频
     GET  /api/hud?id=xxx           查进度
     POST /api/hud/cancel {"id"}    取消
-    POST /api/gate  {"x": 12.3, "y": -40.5}   用这个位置当计时线重算整场
-    POST /api/gate  {"auto": true}             恢复成自动搜索的计时线
+    POST /api/gate  {"t": 454.0}  用「这一刻车在的位置」当计时线重算整场
+    POST /api/gate  {"auto": true} 恢复成自动搜索的计时线
 
 刻意不做的事：不排队、不并发。同一时刻只允许一个出片任务 —— 编码本来就吃满
 所有核心，同时跑两个只会让两个都变慢。
@@ -32,11 +33,16 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import math
+import shutil
+import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -63,6 +69,13 @@ _MB_PER_SECOND = 7.0
 
 _HOST = "127.0.0.1"
 """只监听本地回环。这个服务能启动 ffmpeg，绝不能暴露到局域网。"""
+
+FRAME_WIDTH = 720
+"""取帧时缩到多宽。够看清发车线是哪一条就行，不必给全分辨率。"""
+
+_FRAME_QUALITY = 6
+_FRAME_CACHE = 240
+"""帧缓存最多存几张。往回拖、来回翻帧时不用重算（一张约 40 KB，240 张约 10 MB）。"""
 
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -118,6 +131,8 @@ class _State:
         self.jobs: dict[str, _Job] = {}
         self.lock = threading.Lock()
         self._rebuild_lock = threading.Lock()
+        self._frames: OrderedDict[int, bytes] = OrderedDict()
+        self._frame_lock = threading.Lock()
         # 出片耗时的粗估要用到源视频帧率（输出帧率跟的是源视频）
         try:
             self.src_fps = float(overlay.video_info(self.video)["fps"])
@@ -148,6 +163,83 @@ class _State:
 
     def running(self) -> _Job | None:
         return next((j for j in self.jobs.values() if j.state == "running"), None)
+
+    # ---- 取帧 ----
+    def frame(self, seconds: float) -> dict:
+        """
+        取「视频第 N 秒那一帧」的缩略图，外加那一瞬间车在赛道上的位置。
+
+        两样东西一次给，是因为看板上它们必须同步：画面是给眼睛看的，赛道图上的
+        那条线才是真正会被用上的位置 —— 分两个接口的话，拖动时两者会一前一后地跳。
+
+        为什么慢（实测约 0.4 秒）：GoPro 的关键帧间隔是 1 秒，要拿到中间某一帧，
+        得从上个关键帧解起，等于每取一帧都要解 60 帧 4K。这是源视频的固有代价，
+        所以下面缓存了结果：来回翻帧、往回拖不会重复算。
+        """
+        if self.tel is None:
+            raise RuntimeError("这份数据里没有遥测，读不出车的位置。")
+        if not math.isfinite(seconds):
+            raise ValueError("t 要是一个正常的秒数。")
+
+        duration = float(self.tel.duration)
+        t = min(max(float(seconds), 0.0), max(duration - 1e-3, 0.0))
+        idx = int(round(t * self.src_fps))
+        t = idx / self.src_fps          # 吸附到帧网格，缓存键才稳定
+
+        with self._frame_lock:
+            jpg = self._frames.get(idx)
+            if jpg is not None:
+                self._frames.move_to_end(idx)
+        if jpg is None:
+            jpg = self._grab(t)
+            with self._frame_lock:
+                self._frames[idx] = jpg
+                while len(self._frames) > _FRAME_CACHE:
+                    self._frames.popitem(last=False)
+
+        gate = laps.gate_by_time(self.tel, t)
+        nx, ny = -float(gate.direction[1]), float(gate.direction[0])
+        half = 14.0
+        return {
+            "t": round(t, 4),
+            "frame": idx,
+            "snap_t": round(float(self.tel.t[gate.gate_index]), 4),
+            "x": round(float(gate.x), 1),
+            "y": round(float(gate.y), 1),
+            "line": [[round(float(gate.x - nx * half), 1), round(float(gate.y - ny * half), 1)],
+                     [round(float(gate.x + nx * half), 1), round(float(gate.y + ny * half), 1)]],
+            "jpg": base64.b64encode(jpg).decode(),
+        }
+
+    def _grab(self, t: float) -> bytes:
+        """让 ffmpeg 吐一张 JPEG 到标准输出。"""
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            raise RuntimeError("找不到 ffmpeg，取不了画面（brew install ffmpeg）。")
+        cmd = [
+            ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
+            # -ss 放在 -i 前面：先跳到目标附近的关键帧再往前解，比从头解快得多
+            "-ss", f"{t:.4f}", "-i", str(self.video),
+            "-frames:v", "1", "-an", "-sn", "-dn",
+            "-vf", f"scale={FRAME_WIDTH}:-2", "-q:v", str(_FRAME_QUALITY),
+            "-f", "mjpeg", "pipe:1",
+        ]
+        proc = subprocess.run(cmd, capture_output=True)
+        if proc.returncode != 0 or not proc.stdout:
+            tail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+            raise RuntimeError("取帧失败：" + (tail[-1] if tail else "ffmpeg 没有输出"))
+        return proc.stdout
+
+    def gate_time(self) -> float:
+        """当前计时线是在视频的第几秒（滑动条的初始位置）。"""
+        ls = self.sa.lapset
+        tel = ls.telemetry
+        if tel is None:
+            return 0.0
+        j = getattr(ls.gate, "gate_index", None)
+        if j is None or not 0 <= j < tel.t.size:
+            return 0.0
+        return float(tel.t[j])
 
     # ---- 换计时线重算 ----
     def rebuild(self, gate: laps.Gate | None) -> dict:
@@ -399,8 +491,26 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                     "pad": PAD_SECONDS,
                     "busy": state.running() is not None,
                     "duration": round(duration, 3),
+                    "fps": round(state.src_fps, 6),
+                    "gate_t": round(state.gate_time(), 4),
+                    "frame_width": FRAME_WIDTH,
                     "full_est": state.estimate(duration),
                 })
+                return
+
+            if path == "/api/frame":
+                raw = (parse_qs(url.query).get("t") or [""])[0]
+                try:
+                    t = float(raw)
+                except ValueError:
+                    self._json({"error": "t 要写成秒数，例如 /api/frame?t=454.0"}, 400)
+                    return
+                try:
+                    self._json(state.frame(t))
+                except (KeyError, ValueError) as exc:
+                    self._json({"error": str(exc)}, 400)
+                except RuntimeError as exc:
+                    self._json({"error": str(exc)}, 500)
                 return
 
             if path == "/api/hud":
@@ -440,13 +550,13 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                         summary = state.rebuild(None)
                     else:
                         try:
-                            gx, gy = float(body["x"]), float(body["y"])
+                            t = float(body["t"])
                         except (KeyError, TypeError, ValueError) as exc:
                             raise ValueError(
-                                "要给出赛道图上的坐标：{\"x\": 米, \"y\": 米}，"
+                                "要给出视频时刻：{\"t\": 秒}，"
                                 "或者 {\"auto\": true} 回到自动搜索。"
                             ) from exc
-                        summary = state.rebuild(laps.gate_by_xy(state.tel, gx, gy))
+                        summary = state.rebuild(laps.gate_by_time(state.tel, t))
                 except (KeyError, TypeError, ValueError, RuntimeError) as exc:
                     self._json({"error": str(exc)}, 400)
                 else:
