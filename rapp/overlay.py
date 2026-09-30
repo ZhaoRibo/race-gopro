@@ -283,22 +283,25 @@ def render_hud_frame(
     a_long = float(hud["a_long"][k])
 
     # ------------------------------------------------------------------
-    # 顶部两个卡片的公共几何
+    # 顶部两个卡片的公共边距
     # ------------------------------------------------------------------
-    # 左右边距和中间空当都取同一个常数：这样左上计时卡和右上曲线卡**宽度完全
-    # 相等**，外沿也左右对称。右下时速、左下那排仪表也都统一用这个 M 对齐。
-    M = px(60)                            # 画面四周统一的外边距
-    top_gap = px(60)                      # 两个卡片之间的空当
-    top_w = (W - 2 * M - top_gap) // 2    # 两个卡片各自等宽
-    top_y = px(32)
+    # 四个距离取同一个值 M：计时卡到上边界 / 到左边界，曲线卡到上边界 / 到右边界。
+    # 中间那道空当也取 M，整行就是均匀的节奏：
+    #
+    #     M + 566（计时卡） + M + 760（曲线卡） + M = 画面宽
+    #
+    # 所以 M 不是随便定的 —— 卡片大小不动的活，它只能从宽度里解出来：
+    # 2.7K（2704 宽）下解出 M ≈ 38（1080p 基准），到 px(60) 两张卡就撞上了。
+    # 右下时速和左下纵向 G 条也对着这个 M，画面四边的外沿连成一条线。
+    M = px(38)
 
     # ------------------------------------------------------------------
     # 左上：圈号 / 本圈计时 / 与最快圈的差距
     # ------------------------------------------------------------------
-    panel_w, panel_h = top_w, px(238)
-    base.alpha_composite(_rounded_panel((panel_w, panel_h), px(18), _PANEL), (M, top_y))
+    panel_w, panel_h = px(566), px(238)
+    base.alpha_composite(_rounded_panel((panel_w, panel_h), px(18), _PANEL), (M, M))
 
-    x0, y0 = M + px(28), top_y + px(20)
+    x0, y0 = M + px(28), M + px(20)
     if lap_no > 0:
         d.text((x0, y0), "LAP", font=fonts.get(px(30), mono=True), fill=_DIM)
         d.text((x0 + px(90), y0), f"{lap_no} / {total}", font=fonts.get(px(30), mono=True), fill=_WHITE)
@@ -436,8 +439,8 @@ def render_hud_frame(
     # ------------------------------------------------------------------
     if show_trace and best is not None and best.speed is not None and 1 <= lap_no <= len(ls.laps):
         lap = ls.laps[lap_no - 1]
-        box_w, box_h = top_w, px(196)
-        tb_x, tb_y = W - M - box_w, top_y
+        box_w, box_h = px(760), px(196)
+        tb_x, tb_y = W - M - box_w, M
         base.alpha_composite(_rounded_panel((box_w, box_h), px(14), _PANEL), (tb_x, tb_y))
 
         grid, bs = best.grid, best.speed
