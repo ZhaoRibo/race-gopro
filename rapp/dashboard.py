@@ -275,6 +275,34 @@ _TEMPLATE = r"""<!DOCTYPE html>
 __FILES__</div>
 
 <script>
+// ---------- 页面与服务的生死绑定 ----------
+// 用 rapp/app.py（双击 启动.command 的那个）时，服务和页面是绑在一起的：
+// 页面关掉，服务跟着退出 —— 否则用户每次用完都得自己去找进程杀。
+// 但命令行 --serve 是刻意要长期开着的，所以靠 /api/ping 里的 app 标记区分，
+// 不是 app 起的服务，这段代码什么都不做。
+// 用 sendBeacon 而不是普通 fetch：页面关闭时普通请求会被浏览器掐断，
+// sendBeacon 是专为"最后一句话"设计的，一定会发出去。
+(function lifeLink(){
+  let id = null;
+  window.addEventListener("pagehide", () => {
+    if (id) navigator.sendBeacon("api/bye?id=" + encodeURIComponent(id));
+  });
+  fetch("api/ping", {cache: "no-store"})
+    .then(r => r.json())
+    .then(info => {
+      if (!info.app) return;                 // --serve / 双击打开离线看：不掺和
+      return fetch("api/hello", {cache: "no-store"})
+        .then(r => r.json())
+        .then(h => {
+          id = h.id;
+          setInterval(() => {
+            fetch("api/alive?id=" + id, {method: "POST"}).catch(() => {});
+          }, 10000);
+        });
+    })
+    .catch(() => {});
+})();
+
 const DATA = __DATA__;
 // 图表只用有效圈：出场圈通常慢十几秒，画进来会把其他圈压成一堆
 const LAPS = DATA.laps.filter(l => l.valid);

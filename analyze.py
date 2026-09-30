@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from rapp import (
@@ -214,6 +215,134 @@ def list_gates(video: Path) -> int:
     return 0
 
 
+@dataclass
+class Result:
+    """一次分析的产物。命令行和网页应用走同一条流水线，这里是它的返回值。"""
+
+    sa: analysis.SessionAnalysis
+    outdir: Path
+    video: Path | None
+    html: Path | None
+    charts: list[Path]
+    tables: list[Path]
+    hud_video: Path | None
+
+
+def run_analysis(
+    tel: telemetry.Telemetry,
+    video_path: Path | None,
+    source_name: str,
+    args: argparse.Namespace,
+) -> Result:
+    """
+    跑完「切圈 → 分析 → 写文件 → 报告落点」这一段，返回产物清单。
+
+    为什么从 main() 里提出来：现在有两条路要用它 —— 命令行的 main()，和
+    网页应用（`rapp/app.py`，就是双击启动的那个）。两条路必须产出一模一样的
+    东西，所以只能有一份实现。
+
+    只抽这一层、不往下再切：打印的时机和步骤是绑在一起的（"输出目录：…"必须
+    在出片之前就报出来，不然用户不知道几分钟的等待会落到哪儿），再拆反而难读。
+    `args` 直接用 argparse 的 Namespace，省得把十几个参数再抄一遍签名。
+    """
+    verbose = not args.quiet
+
+    # ------------------------------------------------------------------
+    # 分析
+    # ------------------------------------------------------------------
+    lapset = laps.compute_lapset(
+        tel,
+        gate_latlon=args.gate,
+        gate_time=args.gate_time,
+        gate_index=args.gate_index,
+        sectors=args.sectors,
+        grid_step=args.grid_step,
+        verbose=verbose,
+    )
+    sa = analysis.analyze(lapset, verbose=verbose)
+
+    outdir = resolve_outdir(args.out, video_path, source_name)
+    outdir.mkdir(parents=True, exist_ok=True)
+    # 早早就把落点报出来：HUD 那段可能要跑好几分钟，用户想知道东西会去哪儿
+    if verbose:
+        print(f"\n输出目录：{outdir}")
+
+    # 输出按用途分类，避免十几个文件平铺在一层里找不着北：
+    #   charts/   图表
+    #   tables/   数据表（CSV + JSON）
+    #   最外层    只留"入口文件" dashboard.html（以及可选的 HUD 视频）——
+    #             用户打开输出目录第一眼就该看到它，而不是在一堆 CSV 里翻。
+    charts_dir = outdir / "charts"
+    tables_dir = outdir / "tables"
+
+    report.print_report(sa)
+
+    tables_written: list[Path] = []
+    if not args.no_csv:
+        tables_written = report.export_csv(sa, tables_dir)
+        tables_written.append(report.export_json(sa, tables_dir / "analysis.json"))
+
+    figs: list[Path] = []
+    if not args.no_charts:
+        figs = charts.make_all(sa, charts_dir)
+
+    html: Path | None = None
+    if not args.no_dashboard:
+        # hud_pad 只是给页面显示用的，实际出片以 serve.py 的常量为准
+        html = dashboard.build(sa, outdir / "dashboard.html", hud_pad=serve.PAD_SECONDS)
+
+    # ------------------------------------------------------------------
+    # HUD 叠加视频
+    # ------------------------------------------------------------------
+    out_video: Path | None = None
+    if args.overlay:
+        if video_path is None:
+            # 演示模式下没有源视频，临时生成一段测试画面
+            from rapp.demo import make_test_video
+
+            video_path = outdir / "demo_source.mp4"
+            print("\n演示模式下需要一段源视频，正在用 ffmpeg 生成测试画面…")
+            make_test_video(video_path, duration=min(40.0, tel.duration), fps=30.0)
+            print(f"  已生成 {video_path}")
+
+        out_video = outdir / f"{source_name}_hud.mp4"
+        overlay.burn(
+            video_path,
+            sa,
+            out_video,
+            fps=args.overlay_fps,
+            t_range=args.overlay_range,
+            crf=args.overlay_crf,
+            preset=args.overlay_preset,
+            show_trace=not args.no_trace,
+            verbose=True,
+        )
+
+    # ------------------------------------------------------------------
+    # 输出目录一览
+    # ------------------------------------------------------------------
+    # 只列"该看哪个"，不把十几个文件名全铺出来 —— 目录结构已经说明了一切。
+    print(f"\n全部输出位于：{outdir}")
+    if html is not None:
+        print("  dashboard.html   ← 双击打开，圈速 / G 值 / 弯道分析全在里面")
+    if figs:
+        print(f"  charts/          {len(figs)} 张图（想单独看大图就用这些）")
+    if tables_written:
+        print(f"  tables/          {len(tables_written)} 个数据文件（Excel / pandas 可直接打开）")
+    if out_video is not None:
+        print(f"  {out_video.name:<17}带 HUD 的叠加视频")
+
+    return Result(
+        sa=sa,
+        outdir=outdir,
+        video=video_path,
+        html=html,
+        charts=figs,
+        tables=tables_written,
+        hud_video=out_video,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
@@ -302,90 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         tel = telemetry.load(video_path, verbose=verbose)
         source_name = video_path.stem
 
-    # ------------------------------------------------------------------
-    # 分析
-    # ------------------------------------------------------------------
-    lapset = laps.compute_lapset(
-        tel,
-        gate_latlon=args.gate,
-        gate_time=args.gate_time,
-        gate_index=args.gate_index,
-        sectors=args.sectors,
-        grid_step=args.grid_step,
-        verbose=verbose,
-    )
-    sa = analysis.analyze(lapset, verbose=verbose)
-
-    outdir = resolve_outdir(args.out, video_path, source_name)
-    outdir.mkdir(parents=True, exist_ok=True)
-    # 早早就把落点报出来：HUD 那段可能要跑好几分钟，用户想知道东西会去哪儿
-    if verbose:
-        print(f"\n输出目录：{outdir}")
-
-    # 输出按用途分类，避免十几个文件平铺在一层里找不着北：
-    #   charts/   图表
-    #   tables/   数据表（CSV + JSON）
-    #   最外层    只留"入口文件" dashboard.html（以及可选的 HUD 视频）——
-    #             用户打开输出目录第一眼就该看到它，而不是在一堆 CSV 里翻。
-    charts_dir = outdir / "charts"
-    tables_dir = outdir / "tables"
-
-    report.print_report(sa)
-
-    tables_written: list[Path] = []
-    if not args.no_csv:
-        tables_written = report.export_csv(sa, tables_dir)
-        tables_written.append(report.export_json(sa, tables_dir / "analysis.json"))
-
-    figs: list[Path] = []
-    if not args.no_charts:
-        figs = charts.make_all(sa, charts_dir)
-
-    html: Path | None = None
-    if not args.no_dashboard:
-        # hud_pad 只是给页面显示用的，实际出片以 serve.py 的常量为准
-        html = dashboard.build(sa, outdir / "dashboard.html", hud_pad=serve.PAD_SECONDS)
-
-    # ------------------------------------------------------------------
-    # HUD 叠加视频
-    # ------------------------------------------------------------------
-    out_video: Path | None = None
-    if args.overlay:
-        if video_path is None:
-            # 演示模式下没有源视频，临时生成一段测试画面
-            from rapp.demo import make_test_video
-
-            video_path = outdir / "demo_source.mp4"
-            print("\n演示模式下需要一段源视频，正在用 ffmpeg 生成测试画面…")
-            make_test_video(video_path, duration=min(40.0, tel.duration), fps=30.0)
-            print(f"  已生成 {video_path}")
-
-        out_video = outdir / f"{source_name}_hud.mp4"
-        overlay.burn(
-            video_path,
-            sa,
-            out_video,
-            fps=args.overlay_fps,
-            t_range=args.overlay_range,
-            crf=args.overlay_crf,
-            preset=args.overlay_preset,
-            show_trace=not args.no_trace,
-            verbose=True,
-        )
-
-    # ------------------------------------------------------------------
-    # 输出目录一览
-    # ------------------------------------------------------------------
-    # 只列"该看哪个"，不把十几个文件名全铺出来 —— 目录结构已经说明了一切。
-    print(f"\n全部输出位于：{outdir}")
-    if html is not None:
-        print("  dashboard.html   ← 双击打开，圈速 / G 值 / 弯道分析全在里面")
-    if figs:
-        print(f"  charts/          {len(figs)} 张图（想单独看大图就用这些）")
-    if tables_written:
-        print(f"  tables/          {len(tables_written)} 个数据文件（Excel / pandas 可直接打开）")
-    if out_video is not None:
-        print(f"  {out_video.name:<17}带 HUD 的叠加视频")
+    res = run_analysis(tel, video_path, source_name, args)
 
     # ------------------------------------------------------------------
     # 本地服务（可选，最后跑）：让看板上的「生成 HUD 视频」按钮能用
@@ -395,11 +441,11 @@ def main(argv: list[str] | None = None) -> int:
             print("\n--serve 需要源视频（--demo 没有可叠加的视频，加 --overlay 也不行）。",
                   file=sys.stderr)
             return 2
-        if html is None:
+        if res.html is None:
             print("\n--serve 需要看板文件，但加了 --no-dashboard。去掉它再试。", file=sys.stderr)
             return 2
         return serve.run(
-            sa, outdir, video_path,
+            res.sa, res.outdir, video_path,
             port=args.serve_port,
             fps=args.overlay_fps,
             crf=args.overlay_crf,

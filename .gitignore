@@ -24,3 +24,6 @@ video/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# 网页应用记的"最近打开过的视频"—— 是别人机器上的路径，别带进仓库
+.race-gopro-recent.json

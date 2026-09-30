@@ -113,7 +113,7 @@ class _State:
                  fps: float, crf: int, preset: str, show_trace: bool,
                  sectors: int = 3, grid_step: float = 1.0,
                  write_csv: bool = True, write_charts: bool = True,
-                 write_dashboard: bool = True) -> None:
+                 write_dashboard: bool = True, app_mode: bool = False) -> None:
         self.sa = sa
         self.tel = sa.lapset.telemetry
         self.outdir = outdir.resolve()
@@ -122,6 +122,8 @@ class _State:
         self.crf = crf
         self.preset = preset
         self.show_trace = show_trace
+        self.app_mode = app_mode
+        """是不是网页应用（rapp/app.py）起的。看板靠它决定要不要跟页面绑生死。"""
         # 重算计时线时要沿用的分析参数（和命令行那一次保持一致）
         self.sectors = sectors
         self.grid_step = grid_step
@@ -374,8 +376,38 @@ class _State:
         }
 
 
-def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
-    """把 state 闭包进 handler —— 比挂类属性干净，也不用担心多实例互相踩。"""
+class Session:
+    """
+    一次「服务会话」。state 载入视频之前是 None。
+
+    为什么允许为空：网页应用（rapp/app.py）是先给一个选视频的页面、选完才
+    开始分析的，那时还没有任何分析结果。命令行 --serve 用不到这个中间态，
+    但它和网页应用共用同一套 HTTP 处理器，所以把 state 拿出来单独放。
+    """
+
+    def __init__(self) -> None:
+        self.state: _State | None = None
+
+
+def build_state(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
+                fps: float = 15.0, crf: int = 20, preset: str = "medium",
+                show_trace: bool = True, sectors: int = 3, grid_step: float = 1.0,
+                write_csv: bool = True, write_charts: bool = True,
+                write_dashboard: bool = True, app_mode: bool = False) -> _State:
+    """把一次分析结果包成服务端状态。--serve 和网页应用都走这里。"""
+    return _State(sa, Path(outdir), Path(video), fps=fps, crf=crf,
+                  preset=preset, show_trace=show_trace,
+                  sectors=sectors, grid_step=grid_step,
+                  write_csv=write_csv, write_charts=write_charts,
+                  write_dashboard=write_dashboard, app_mode=app_mode)
+
+
+def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
+    """把 session 闭包进 handler —— 比挂类属性干净，也不用担心多实例互相踩。
+
+    公开（没有下划线）是因为网页应用 rapp/app.py 要在这上面再包一层：
+    载入视频之前它自己接管路由，载入之后原样交回给这里。
+    """
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "race-gopro-hud"
@@ -403,7 +435,7 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
             except (ValueError, TypeError):
                 return {}
 
-        def _path_for(self, url_path: str) -> Path | None:
+        def _path_for(self, url_path: str, state: _State) -> Path | None:
             """把 URL 映射到输出目录里的文件。"""
             if url_path in ("/", "/dashboard.html", "/index.html"):
                 return state.outdir / "dashboard.html"
@@ -478,6 +510,13 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
             self._route(head_only=True)
 
         def _route(self, head_only: bool) -> None:
+            state = session.state
+            if state is None:
+                # 还没载入视频（网页应用的选视频阶段）。命令行 --serve 下不会
+                # 出现，因为 run() 一走就已经把 state 填好了。
+                self._json({"error": "还没有载入视频"}, 409)
+                return
+
             url = urlparse(self.path)
             path = url.path
 
@@ -494,6 +533,7 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                     "fps": round(state.src_fps, 6),
                     "gate_t": round(state.gate_time(), 4),
                     "frame_width": FRAME_WIDTH,
+                    "app": state.app_mode,
                     "full_est": state.estimate(duration),
                 })
                 return
@@ -522,13 +562,17 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
                     self._json(state.as_json(job))
                 return
 
-            target = self._path_for(path)
+            target = self._path_for(path, state)
             if target is None:
                 self._json({"error": "没有这个路径"}, 404)
             else:
                 self._send_file(target, head_only=head_only)
 
         def do_POST(self):                   # noqa: N802
+            state = session.state
+            if state is None:
+                self._json({"error": "还没有载入视频"}, 409)
+                return
             path = urlparse(self.path).path
             body = self._body()
             if path == "/api/hud":
@@ -567,6 +611,17 @@ def _make_handler(state: _State) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def bind(handler_cls: type[BaseHTTPRequestHandler], port: int) -> ThreadingHTTPServer:
+    """
+    把端口占上，占不上就报一句人话。
+
+    单独拎出来是因为「端口被占」有两种完全不同的情况，需要两种反应：
+    命令行 --serve 下建议换个端口；网页应用下面应该直接打开**已经在跑的那个**，
+    而不是让用户困惑。所以这里只负责报错，怎么处理交给调用方。
+    """
+    return ThreadingHTTPServer((_HOST, port), handler_cls)
+
+
 def run(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
         port: int = 8765, fps: float = 15.0, crf: int = 20,
         preset: str = "medium", show_trace: bool = True,
@@ -574,13 +629,15 @@ def run(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
         write_csv: bool = True, write_charts: bool = True,
         write_dashboard: bool = True) -> int:
     """起服务并一直阻塞到 Ctrl+C。返回进程退出码。"""
-    state = _State(sa, Path(outdir), Path(video), fps=fps, crf=crf,
-                   preset=preset, show_trace=show_trace,
-                   sectors=sectors, grid_step=grid_step,
-                   write_csv=write_csv, write_charts=write_charts,
-                   write_dashboard=write_dashboard)
+    state = build_state(sa, outdir, video, fps=fps, crf=crf,
+                        preset=preset, show_trace=show_trace,
+                        sectors=sectors, grid_step=grid_step,
+                        write_csv=write_csv, write_charts=write_charts,
+                        write_dashboard=write_dashboard)
+    session = Session()
+    session.state = state
     try:
-        httpd = ThreadingHTTPServer((_HOST, port), _make_handler(state))
+        httpd = bind(make_handler(session), port)
     except OSError as exc:
         print(f"\n端口 {port} 起不来：{exc}", file=sys.stderr)
         print("换一个：--serve-port 8766", file=sys.stderr)
@@ -607,4 +664,5 @@ def run(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
     return 0
 
 
-__all__ = ["PAD_SECONDS", "run"]
+__all__ = ["PAD_SECONDS", "FRAME_WIDTH", "Session", "bind", "build_state",
+           "make_handler", "run"]
