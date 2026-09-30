@@ -77,6 +77,32 @@ _TEMPLATE = r"""<!DOCTYPE html>
         padding:11px 14px;border-radius:8px;font-size:12.5px;margin-bottom:16px;line-height:1.7;}
   .pill{display:inline-block;padding:1px 7px;border-radius:20px;font-size:11px;
         background:#232a33;color:var(--dim);margin-left:6px;}
+
+  /* 圈选择器：吸顶，滚到哪张图都能随手勾 */
+  .picker{position:sticky;top:0;z-index:20;background:var(--bg);
+          border:1px solid var(--line);border-radius:12px;padding:12px 16px 11px;
+          margin-bottom:18px;box-shadow:0 10px 18px -14px #000;}
+  .picker .row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;}
+  .picker h2{margin:0;font-size:14px;font-weight:600;}
+  .picker .count{color:var(--dim);font-size:12px;font-variant-numeric:tabular-nums;}
+  .lapchips{display:flex;flex-wrap:wrap;gap:7px;margin:10px 0 9px;}
+  .lapchip{display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+           background:var(--panel);border:1px solid var(--line);border-radius:8px;
+           padding:4px 10px 4px 7px;font-size:12.5px;user-select:none;
+           font-variant-numeric:tabular-nums;color:var(--dim);}
+  .lapchip:hover{border-color:#39414d;}
+  .lapchip.on{color:var(--fg);border-color:#39414d;background:#1c2430;}
+  .lapchip input{accent-color:var(--accent);margin:0;cursor:pointer;}
+  .lapchip em{font-style:normal;color:var(--dim);font-size:11.5px;}
+  .lapchip.on em{color:#a9b4c0;}
+  .lapchip.best span{color:var(--best);font-weight:600;}
+  .pickerbtns{display:flex;gap:7px;flex-wrap:wrap;}
+  .pickerbtns button{background:var(--panel);color:var(--dim);border:1px solid var(--line);
+                     border-radius:7px;padding:4px 11px;font-size:12px;cursor:pointer;
+                     font-family:inherit;}
+  .pickerbtns button:hover{color:var(--fg);border-color:#39414d;background:#1c2430;}
+  .picker .hint{margin:9px 0 0;color:var(--dim);font-size:11.5px;line-height:1.6;}
+
   /* “其他文件”区块：指向 charts/ 与 tables/ 里的产物 */
   section h3{margin:15px 0 7px;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.4px;}
   section h3:first-of-type{margin-top:4px;}
@@ -99,6 +125,22 @@ _TEMPLATE = r"""<!DOCTYPE html>
   <div class="cards">
     __CARDS__
   </div>
+
+  <section class="picker" id="picker" hidden>
+    <div class="row">
+      <h2>选择要显示的圈</h2>
+      <span class="count" id="pickerCount"></span>
+    </div>
+    <div class="lapchips" id="lapPicker"></div>
+    <div class="pickerbtns" id="pickerBtns">
+      <button type="button" data-act="all">全选</button>
+      <button type="button" data-act="none">全不选</button>
+      <button type="button" data-act="best">只看最快圈</button>
+      <button type="button" data-act="top3">最快 3 圈</button>
+      <button type="button" data-act="top5">最快 5 圈</button>
+    </div>
+    <p class="hint">勾选会同时作用到下面所有「每圈一条线」的图表：速度—距离曲线、时间差、每圈走线、每圈走线偏差。<b>点任意一张图的图例效果完全一样</b>，两边是同步的（圈速分布、G-G 图、赛道俯视图不受影响 —— 它们不是按圈拆的）。</p>
+  </section>
 
   <section>
     <h2>圈速分布</h2>
@@ -228,6 +270,84 @@ const refLinePlugin = {
 };
 Chart.register(refLinePlugin);
 
+// ---------- 圈选择开关 ----------
+// 下面所有「每圈一条线」的图表共用这一份状态。点勾选框和点图例是同一件事：
+// 都改这一份状态，然后统一刷所有注册过的图表 —— 两边永远不会不同步。
+const lapOn = new Map();
+LAPS.forEach(l => lapOn.set(l.index, true));
+const LAP_CHARTS = [];   // [{chart, laps: [圈号, ...]}]，laps[i] 是第 i 个 dataset 对应的圈号
+
+function applyLapSelection() {
+  for (const item of LAP_CHARTS) {
+    item.chart.data.datasets.forEach((ds, i) => {
+      const idx = item.laps[i];
+      ds.hidden = idx === undefined ? false : !lapOn.get(idx);
+    });
+    item.chart.update("none");
+  }
+  syncPicker();
+}
+
+function toggleLap(idx, force) {
+  lapOn.set(idx, force === undefined ? !lapOn.get(idx) : !!force);
+  applyLapSelection();
+}
+
+// 注册一张"按圈拆"的图表：接管它的图例点击（改成切全局选择），
+// 并记下 dataset 序号 → 圈号 的映射（各图表的映射并不一样：
+// Delta 图就刻意不含最快圈，因为自己减自己是恒为 0 的一条直线）。
+function registerLapChart(chart, lapIdx) {
+  if (chart.options.plugins && chart.options.plugins.legend) {
+    chart.options.plugins.legend.onClick = (evt, item) => {
+      const idx = lapIdx[item.datasetIndex];
+      if (idx !== undefined) toggleLap(idx);
+    };
+  }
+  LAP_CHARTS.push({chart, laps: lapIdx});
+  return chart;
+}
+
+const pickerEl = document.getElementById("lapPicker");
+function syncPicker() {
+  pickerEl.querySelectorAll("input[data-lap]").forEach(inp => {
+    const on = !!lapOn.get(+inp.dataset.lap);
+    inp.checked = on;
+    inp.parentElement.classList.toggle("on", on);
+  });
+  const n = [...lapOn.values()].filter(Boolean).length;
+  document.getElementById("pickerCount").textContent =
+    "已选 " + n + " / " + LAPS.length + " 圈" + (n ? "" : "（图表会是空的）");
+}
+
+(function initPicker(){
+  if (!LAPS.length) return;
+  document.getElementById("picker").hidden = false;
+  pickerEl.innerHTML = LAPS.map(l =>
+    '<label class="lapchip' + (isBest(l) ? " best" : "") + '">' +
+      '<input type="checkbox" data-lap="' + l.index + '" checked>' +
+      "<span>#" + l.index + (isBest(l) ? " ★" : "") + "</span>" +
+      "<em>" + l.time + "</em>" +
+    "</label>").join("");
+  pickerEl.addEventListener("change", e => {
+    if (e.target.matches("input[data-lap]")) toggleLap(+e.target.dataset.lap, e.target.checked);
+  });
+  document.getElementById("pickerBtns").addEventListener("click", e => {
+    const act = e.target.dataset.act;
+    if (!act) return;
+    const byTime = [...LAPS].sort((a, b) => a.duration_s - b.duration_s);
+    const pick = k => new Set(byTime.slice(0, k).map(l => l.index));
+    if (act === "all") LAPS.forEach(l => lapOn.set(l.index, true));
+    else if (act === "none") LAPS.forEach(l => lapOn.set(l.index, false));
+    else if (act === "best") LAPS.forEach(l => lapOn.set(l.index, isBest(l)));
+    else if (act === "top3" || act === "top5") {
+      const keep = pick(act === "top3" ? 3 : 5);
+      LAPS.forEach(l => lapOn.set(l.index, keep.has(l.index)));
+    }
+    applyLapSelection();
+  });
+  syncPicker();
+})();
+
 // ---------- 1. 圈速柱状图 ----------
 const dur = LAPS.map(l => l.duration_s);
 const refs = dur.concat([DATA.theoretical_best, DATA.rolling_best]);
@@ -270,7 +390,7 @@ const speedSets = LAPS.map((l,i) => ({
   borderWidth: isBest(l) ? 2.6 : 1.2,
   pointRadius: 0, tension: 0.15, spanGaps: true
 }));
-new Chart(document.getElementById("cSpeed"), {
+const cSpeed = new Chart(document.getElementById("cSpeed"), {
   type: "line",
   data: {datasets: speedSets},
   options: {
@@ -286,6 +406,7 @@ new Chart(document.getElementById("cSpeed"), {
     }
   }
 });
+registerLapChart(cSpeed, LAPS.map(l => l.index));
 
 // ---------- 3. Delta 曲线 ----------
 const deltaSets = LAPS.filter(l => !isBest(l)).map(l => {
@@ -297,7 +418,7 @@ const deltaSets = LAPS.filter(l => !isBest(l)).map(l => {
     borderWidth: 1.4, pointRadius: 0, tension: 0.15, spanGaps: true
   };
 });
-new Chart(document.getElementById("cDelta"), {
+const cDelta = new Chart(document.getElementById("cDelta"), {
   type: "line",
   data: {datasets: deltaSets},
   options: {
@@ -314,6 +435,9 @@ new Chart(document.getElementById("cDelta"), {
     }
   }
 });
+// Delta 图刻意不含最快圈（自己减自己恒为 0），所以映射和别的图表不一样，
+// 必须显式传它自己的圈号列表，不能假设跟 LAPS 的序号一一对应。
+registerLapChart(cDelta, LAPS.filter(l => !isBest(l)).map(l => l.index));
 
 // ---------- 4. G-G 图 ----------
 const gg = DATA.gg;
@@ -405,7 +529,7 @@ function speedColor(s, lo, hi) {
 const LINES = DATA.laps.filter(l => l.valid && l.path && l.path.length);
 if (LINES.length && DATA.line_extent) {
   const ext = DATA.line_extent;
-  new Chart(document.getElementById("cLines"), {
+  const cLines = new Chart(document.getElementById("cLines"), {
     type: "line",
     data: {datasets: LINES.map((l, i) => ({
       label: "#" + l.index + " " + l.time + (isBest(l) ? " ★" : ""),
@@ -433,6 +557,7 @@ if (LINES.length && DATA.line_extent) {
       }
     }
   });
+  registerLapChart(cLines, LINES.map(l => l.index));
 }
 
 // ---------- 每圈走线偏差：相对平均线的横向偏移 ----------
@@ -440,7 +565,7 @@ if (LINES.length && DATA.line_extent) {
 // 在叠加图上噪声会把差异盖住，看起来"所有圈都跑在同一条线上"。
 // 把相对平均线的偏移单独画出来，差异才量化得出来。
 if (LINES.length) {
-  new Chart(document.getElementById("cDev"), {
+  const cDev = new Chart(document.getElementById("cDev"), {
     type: "line",
     data: {datasets: LINES.map((l, i) => ({
       label: "#" + l.index + " " + l.time + (isBest(l) ? " ★" : ""),
@@ -467,6 +592,7 @@ if (LINES.length) {
       }
     }
   });
+  registerLapChart(cDev, LINES.map(l => l.index));
 }
 }  // end Chart available
 
