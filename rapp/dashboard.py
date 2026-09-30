@@ -24,6 +24,7 @@ import numpy as np
 
 from . import analysis as ana
 from . import laps
+from . import subproc
 
 _TEMPLATE = r"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -1296,7 +1297,6 @@ def _check_inline_js(html: str) -> str | None:
     """
     import re
     import shutil
-    import subprocess
     import tempfile
 
     node = shutil.which("node")
@@ -1312,7 +1312,7 @@ def _check_inline_js(html: str) -> str | None:
         f.write(blocks[-1])
         tmp = f.name
     try:
-        proc = subprocess.run([node, "--check", tmp], capture_output=True, text=True)
+        proc = subproc.run([node, "--check", tmp], capture_output=True, text=True)
         if proc.returncode == 0:
             return None
         lines = [ln.strip() for ln in (proc.stderr or "").splitlines() if ln.strip()]

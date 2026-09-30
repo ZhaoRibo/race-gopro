@@ -44,6 +44,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from . import analysis as ana
 from . import imu, laps
+from . import subproc
 
 # 配色
 _WHITE = (240, 245, 250, 255)
@@ -128,7 +129,7 @@ def video_info(path: str | Path) -> dict:
         "-show_entries", "stream=width,height,r_frame_rate,duration",
         "-of", "json", str(path),
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    out = subproc.run(cmd, capture_output=True, text=True, check=True).stdout
     st = json.loads(out)["streams"][0]
     num, den = (st.get("r_frame_rate") or "30/1").split("/")
     fps = float(num) / float(den) if float(den) else 30.0
@@ -553,7 +554,7 @@ def burn(
         print(f"\n开始生成 HUD 叠加视频：{W}×{H} @ {fps} fps，共 {n_frames} 帧")
         print("（进度条由 ffmpeg 输出，中途可以按 Ctrl+C 中断）")
 
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=None)
+    proc = subproc.popen(cmd, stdin=subprocess.PIPE, stderr=None)
     assert proc.stdin is not None
     # 每 2% 回调一次就够了；每帧都回调反而会让进度条一直在抖
     step = max(1, n_frames // 50)

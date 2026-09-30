@@ -39,12 +39,13 @@ GPMF 二进制格式
 from __future__ import annotations
 
 import shutil
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+
+from . import subproc
 
 # --------------------------------------------------------------------------
 # 类型码表：GPMF 类型字符 → (numpy/struct 格式字符, 单个标量字节数)
@@ -195,7 +196,7 @@ def probe_streams(mp4_path: str | Path) -> list[dict]:
         "-of", "json",
         str(mp4_path),
     ]
-    out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
+    out = subproc.run(cmd, capture_output=True, text=True, check=True).stdout
     import json
 
     return json.loads(out).get("streams", [])
@@ -239,7 +240,7 @@ def extract_gpmd_raw(mp4_path: str | Path) -> bytes:
                 "-f", fmt,
                 tmp_path,
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True)
+            proc = subproc.run(cmd, capture_output=True, text=True)
             blob = Path(tmp_path).read_bytes() if Path(tmp_path).exists() else b""
             Path(tmp_path).unlink(missing_ok=True)
             # gpmd 流以 'DEVC' 容器开头，用这个特征确认抽取成功

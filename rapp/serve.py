@@ -37,7 +37,6 @@ import base64
 import json
 import math
 import shutil
-import subprocess
 import sys
 import threading
 import time
@@ -52,6 +51,7 @@ from . import dashboard
 from . import laps
 from . import overlay
 from . import report
+from . import subproc
 
 PAD_SECONDS = 5.0
 """出片时在每圈前后各留几秒 —— 不然过线那一瞬间的内容会被切掉。"""
@@ -225,7 +225,7 @@ class _State:
             "-vf", f"scale={FRAME_WIDTH}:-2", "-q:v", str(_FRAME_QUALITY),
             "-f", "mjpeg", "pipe:1",
         ]
-        proc = subprocess.run(cmd, capture_output=True)
+        proc = subproc.run(cmd, capture_output=True)
         if proc.returncode != 0 or not proc.stdout:
             tail = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
             raise RuntimeError("取帧失败：" + (tail[-1] if tail else "ffmpeg 没有输出"))

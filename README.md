@@ -625,11 +625,13 @@ race-gopro/
 │   ├── overlay.py       HUD 叠加视频
 │   ├── serve.py         本地小服务（出片 / 改计时线）
 │   ├── app.py           网页应用的入口：选视频 → 分析 → 跳看板
+│   ├── subproc.py       起子进程的统一入口（Windows 上不弹控制台窗口）
 │   └── demo.py          合成数据生成器（兼做自检）
 └── tests/
-    ├── test_gpmf.py        GPMF 解析器回归测试
-    ├── test_paths.py       文件名的跨平台检查（防 Windows checkout 失败）
-    └── test_no_console.py  无控制台启动检查（防 Windows 打包版一启动就弹窗）
+    ├── test_gpmf.py                   GPMF 解析器回归测试
+    ├── test_paths.py                  文件名的跨平台检查（防 Windows checkout 失败）
+    ├── test_no_console.py             无控制台启动检查（防 Windows 打包版一启动就弹窗）
+    └── test_subprocess_hygiene.py     子进程检查（防 Windows 上每点一下闪一个黑框）
 ```
 
 数据在包里是这么往下流的（想加功能就沿着这条链找）：
@@ -708,6 +710,15 @@ macOS 允许文件名里带反斜杠、末尾带空格，Windows 不允许 —�
 
 ```bash
 .venv/bin/python -m tests.test_no_console
+```
+
+`tests/test_subprocess_hygiene.py` 盯着子进程怎么写：窗口模式下 Windows 会给**每个**
+子进程开一个新的控制台窗口，而这个程序一分析视频就反复调 ffmpeg，于是看板上每点
+一下就闪一个黑框。修法是统统走 `rapp/subproc.py`（它会带上 `CREATE_NO_WINDOW`），
+而这个标志只在 Windows 上生效、macOS 上漏了看不出来，所以得靠测试盯着：
+
+```bash
+.venv/bin/python -m tests.test_subprocess_hygiene
 ```
 
 想用 pytest 的话得先装（它不在运行依赖里）：
@@ -897,6 +908,16 @@ CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展
   负责把输出接到日志的 `_redirect_output()` 还早，等不到它救命。v0.1.2 的
   Windows 包一启动就弹窗，就是这么来的。护栏放在 `rapp/__init__.py`（所有入口
   都要先过包初始化，一处管住全部），`tests/test_no_console.py` 盯着它别改回去。
+- **别直接调 `subprocess`**：窗口模式下 Windows 会给每个子进程开一个新的控制台
+  窗口。而这个程序一分析视频就反复调 ffmpeg（取单帧、解遥测、编 HUD），于是
+  看板上每点一下就闪一个黑框又立刻消失（用户实测反馈"很烦"）。全部走
+  `rapp/subproc.py` 的 `run()` / `popen()`，它们带 `CREATE_NO_WINDOW` —— 这个
+  标志**只在 Windows 上生效，macOS 上漏了也看不出来**，所以
+  `tests/test_subprocess_hygiene.py` 专门盯着"有没有人绕过它"。
+- **Windows 的文件选择框必须挂在 owner 窗体上**（`$d.ShowDialog($f)`，不能是空的
+  `ShowDialog()`），否则对话框会躲在浏览器后面：那个进程既没控制台、也没前台窗口
+  可依附，Windows 就不会把它激活到最前面，用户看到的就是"点了没反应"（v0.1.3
+  实测）。那个 owner 窗体必须 `TopMost`，测试里也有一条盯着它。
 - **资源路径**：包里的 ffmpeg 在 `sys._MEIPASS/bin`，用户数据（最近打开过的视频、
   日志）在系统的用户数据目录 —— `.app` 是只读的，不能往自己里面写。
   这些分支都在 `rapp/app.py` 开头那几个函数里。

@@ -31,7 +31,6 @@ import collections
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -43,7 +42,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import serve, telemetry
+from . import serve, subproc, telemetry
 
 _FROZEN = bool(getattr(sys, "frozen", False))
 """是不是被打包成独立 App 了（PyInstaller）。打包后路径规则全变。"""
@@ -141,7 +140,7 @@ def _complain(text: str) -> None:
                 0, text, "卡丁车遥测分析", 0x30)
         elif sys.platform == "darwin" and Path("/usr/bin/osascript").exists():
             safe = text.replace("\\", "\\\\").replace('"', '\\"')
-            subprocess.run(
+            subproc.run(
                 ["/usr/bin/osascript", "-e",
                  f'display dialog "{safe}" buttons {{"好"}} default button 1 '
                  f'with title "卡丁车遥测分析" with icon caution giving up after 300'],
@@ -306,8 +305,8 @@ def choose_file() -> tuple[str | None, str]:
     if sys.platform == "darwin" and shutil.which("osascript"):
         script = ('POSIX path of (choose file with prompt "选择 GoPro 拍的视频" '
                   'of type {"mp4", "MP4", "mov", "MOV", "m4v"})')
-        req = subprocess.run(["osascript", "-e", script],
-                             capture_output=True, text=True)
+        req = subproc.run(["osascript", "-e", script],
+                          capture_output=True, text=True)
         if req.returncode == 0 and req.stdout.strip():
             return req.stdout.strip(), ""
         err = " ".join((req.stderr or "").split())
@@ -318,20 +317,46 @@ def choose_file() -> tuple[str | None, str]:
                       "系统对话框被中断了，再点一次试试；或者用下面的「浏览文件夹」。")
 
     if os.name == "nt":
-        # Windows 没有 osascript，用 .NET 的 OpenFileDialog（PowerShell 一行调起）。
+        # Windows 没有 osascript，用 .NET 的 OpenFileDialog（PowerShell 调起）。
         # 比多带一个依赖划算，而且拿到的就是真路径。
+        #
+        # 两个坑都是用户实测报回来的（v0.1.3）：
+        #  1. **不给 owner 窗口就直 ShowDialog()，对话框会躲在浏览器后面。**
+        #     这个进程是窗口模式、又被 CREATE_NO_WINDOW 去掉了控制台，根本没有
+        #     前台窗口可依附，Windows 就不会把它激活到最前面 —— 用户看到的就是
+        #     "点了没反应"（而 ShowDialog 是阻塞的，那个请求也就一直挂着）。
+        #     所以要造一个 TopMost 的隐藏窗体当 owner，逼它到前台。
+        #  2. **中文路径别走 stdout**：控制台没了，编码还可能被代码页改坏。
+        #     让 PowerShell 写进一个 UTF-8 临时文件、Python 再读，最稳。
+        with tempfile.NamedTemporaryFile(prefix="race-gopro-pick-", suffix=".txt",
+                                         delete=False) as tmp:
+            out_path = Path(tmp.name)
         ps = (
             "Add-Type -AssemblyName System.Windows.Forms; "
+            "$f = New-Object System.Windows.Forms.Form; "
+            "$f.TopMost = $true; $f.ShowInTaskbar = $false; "
+            "$f.WindowState = 'Minimized'; "
             "$d = New-Object System.Windows.Forms.OpenFileDialog; "
             "$d.Filter = '视频|*.mp4;*.MP4;*.mov;*.MOV;*.m4v|所有文件|*.*'; "
             "$d.Title = '选择 GoPro 拍的视频'; "
-            "if ($d.ShowDialog() -eq 'OK') { [Console]::Out.Write($d.FileName) }"
+            "$r = $d.ShowDialog($f); "
+            "$f.Dispose(); "
+            "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { "
+            f"[System.IO.File]::WriteAllText('{out_path}', $d.FileName, "
+            "(New-Object System.Text.UTF8Encoding($false))) }"
         )
-        req = subprocess.run(
-            ["powershell", "-NoProfile", "-STA", "-Command", ps],
-            capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if req.returncode == 0 and req.stdout.strip():
-            return req.stdout.strip(), ""
+        try:
+            req = subproc.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
+                              capture_output=True, text=True)
+            chosen = (out_path.read_text(encoding="utf-8-sig").strip()
+                      if out_path.exists() else "")
+        except OSError as exc:
+            return None, (f"没能调起系统文件框（{exc}）；用下面的「浏览文件夹」，"
+                          "或者直接把路径粘到输入框里。")
+        finally:
+            out_path.unlink(missing_ok=True)
+        if req.returncode == 0 and chosen:
+            return chosen, ""
         if req.returncode == 0:
             return None, ""              # 用户点了取消
         err = " ".join((req.stderr or "").split())
@@ -339,7 +364,7 @@ def choose_file() -> tuple[str | None, str]:
                       "系统文件框被中断了，再点一次试试；或者用下面的「浏览文件夹」。")
 
     if shutil.which("zenity"):                       # Linux 的常见选择
-        req = subprocess.run(
+        req = subproc.run(
             ["zenity", "--file-selection", "--title=选择 GoPro 拍的视频",
              "--file-filter=视频 | *.mp4 *.MP4 *.mov *.MOV *.m4v"],
             capture_output=True, text=True)
@@ -935,7 +960,7 @@ def _open_browser(url: str) -> None:
     或者被系统默默拒掉，而 `open` 只是个普通子进程，没这层事）。
     """
     if sys.platform == "darwin" and Path("/usr/bin/open").exists():
-        req = subprocess.run(["/usr/bin/open", url], capture_output=True, text=True)
+        req = subproc.run(["/usr/bin/open", url], capture_output=True, text=True)
         if req.returncode == 0:
             return
         print(f"[提示] /usr/bin/open 没成功（{req.stderr.strip()}），换 webbrowser 再试",

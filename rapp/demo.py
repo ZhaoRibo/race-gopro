@@ -19,13 +19,12 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from . import geo, telemetry
+from . import geo, subproc, telemetry
 from .geo import G0
 
 # GoPro 的加速度计坐标约定：x = 画面右，y = 画面下，z = 镜头朝前
@@ -458,7 +457,7 @@ def make_test_video(
         "-c:a", "aac", "-b:a", "96k", "-shortest",
         str(path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    subproc.run(cmd, check=True, capture_output=True)
     return path
 
 
