@@ -25,8 +25,26 @@ cd "$here" || exit 1
 name="卡丁车遥测分析"
 log="$here/.race-gopro.log"
 
-# 把一段文字用对话框显示出来。AppleScript 的字符串里 \\ 和 " 要转义。
+# 先把"被调起"记下来（含 PATH）。这一步放在所有检查之前是有意的：
+# 万一后面哪一步没过、屏幕上只弹了个框，日志里也得留得下线索 ——
+# 排查"双击没反应"时，第一句话就是"脚本到底跑起来没有"。
+{
+  echo "──────────────────────────────────────────────"
+  echo "被调起：$(date '+%Y-%m-%d %H:%M:%S')"
+  echo "仓库目录：$here"
+  echo "PATH（进来的）：$PATH"
+} >>"$log"
+
+# 关键：GUI 启动的程序拿到的是系统默认 PATH（/usr/bin:/bin:/usr/sbin:/sbin），
+# 里面**没有 Homebrew** —— 那是 shell 的 rc 文件加的，而 .app 根本不经过 shell。
+# 而 ffmpeg/ffprobe 就装在 Homebrew 里，不补上这句就会误报"没装 ffmpeg"。
+# 后面的 python 也靠 PATH 找这两个程序，所以得 export 出去。
+PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$HOME/.local/bin:$PATH"
+export PATH
+
+# 弹个对话框告诉用户出事了，同时把同一句话写进日志
 say() {
+  printf '\n%s\n' "$1" >>"$log"
   /usr/bin/osascript -e \
     "display dialog \"$(printf '%s' "$1" | /usr/bin/sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')\" \
 buttons {\"好\"} default button 1 with title \"$name\" with icon caution" >/dev/null 2>&1
@@ -55,15 +73,17 @@ fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then
   say "没找到 ffmpeg —— 读视频、出片都要靠它。
-在终端里执行一次：brew install ffmpeg"
+在终端里执行一次：brew install ffmpeg
+
+（如果确实装了：在终端里跑 which ffmpeg 看它在哪个目录，
+再把那个目录加进启动脚本里的 PATH，或装到 /opt/homebrew/bin。）"
   exit 1
 fi
 
 {
-  echo "──────────────────────────────────────────────"
-  echo "启动时间：$(date '+%Y-%m-%d %H:%M:%S')"
-  echo "仓库目录：$here"
   echo "解释器：  $PY"
+  echo "ffmpeg：  $(command -v ffmpeg)"
+  echo "PATH（修补后）：$PATH"
 } >>"$log"
 
 # 标准输出同时进日志（网页上的进度也是从同一份来的）
@@ -77,6 +97,9 @@ fi
 
 echo "异常退出（$code）" >>"$log"
 say "程序退出了（退出码 $code）。
-原因写在日志里，可以用「控制台」打开看：
-$log"
+具体原因写在日志里：
+$log
+
+（.race-gopro.log 是隐藏文件，在 Finder 里按 ⌘⇧. 才能看到；
+也可以复制上面这个路径，用「前往文件夹」⌘⇧G 粘进去。）"
 exit "$code"

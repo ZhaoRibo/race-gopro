@@ -772,9 +772,33 @@ def _make_handler(app: _App) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def _fix_tool_path() -> None:
+    """
+    把 Homebrew 那几个目录补进 PATH。
+
+    为什么需要：双击 .app 时，程序拿到的是系统默认 PATH
+    （/usr/bin:/bin:/usr/sbin:/sbin）—— 里面**没有 Homebrew**，因为那是 shell
+    的 rc 文件加的，而 .app 根本不经过 shell。结果就是 ffmpeg 明明装在
+    /opt/homebrew/bin，`shutil.which("ffmpeg")` 却找不到，整个程序直接罢工。
+
+    只在真的找不到时才补，不改动用户自己的环境；命令行启动时 PATH 本来就是
+    全的，这个函数会直接返回。
+    """
+    if shutil.which("ffmpeg") and shutil.which("ffprobe"):
+        return
+    parts = [p for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    for d in ("/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"):
+        if os.path.isdir(d) and d not in parts:
+            parts.append(d)
+    os.environ["PATH"] = os.pathsep.join(parts)
+    if shutil.which("ffmpeg"):
+        print(f"[提示] PATH 里原来没有 ffmpeg，已补上 {os.environ['PATH']}", flush=True)
+
+
 # ==========================================================================
 def run(port: int = 8765, open_browser: bool = True) -> int:
     """起应用并阻塞到退出。返回进程退出码。"""
+    _fix_tool_path()
     hud_args = dict(fps=15.0, crf=20, preset="veryfast", show_trace=True,
                     sectors=3, grid_step=1.0)
     app = _App(hud_args, open_browser=open_browser)
