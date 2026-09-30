@@ -428,11 +428,13 @@ def render_hud_frame(
     # 「横向」用中文字体、数字用等宽字体分开画：等宽字体不含中文字形，
     # 混在一串里会把中文变成豆腐块；而数字用等宽才能在跳动时不左右飘。
     y_lab = lab_y
-    # 和纵向 G 那边一个排法：标签在上、数值在下，两行都居中对着圆盘
-    d.text((cx, y_lab), "横向", font=lab_sans, fill=_DIM, anchor="ms")
-    d.text((cx, y_lab + px(46)),
+    # 和纵向 G 一模一样的排法（标签在上、数值在下），左边缘也对齐成同一行的两列。
+    # 原来把这一块居中对着圆盘，结果离左边的纵向 G 读数太远，看着像两块不相干的东西。
+    lat_x = bx + px(150)
+    d.text((lat_x, y_lab), "横向", font=lab_sans, fill=_DIM, anchor="ls")
+    d.text((lat_x, y_lab + px(46)),
            f"{a_lat:+.2f} g" if np.isfinite(a_lat) else "-- g",
-           font=lab_num, fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ms")
+           font=lab_num, fill=_CYAN if np.isfinite(a_lat) else _DIM, anchor="ls")
 
     # ------------------------------------------------------------------
     # 右上：本圈速度曲线 + 最快圈参考 + 当前位置游标
