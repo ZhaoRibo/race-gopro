@@ -46,6 +46,19 @@ _MPL_CACHE = ROOT / "packaging" / "matplotlib"
 if _MPL_CACHE.is_dir() and any(_MPL_CACHE.iterdir()):
     datas.append((str(_MPL_CACHE), "matplotlib"))
 
+# ---- HUD 用的字体（build.py 下的开源字体，约 9 MB）----
+# **必须带上**。不带的话，用户机器上缺字体时 HUD 的文字会静默变成 11 px 的位图，
+# 小到看不见（v0.1.4 的 Windows 包就是这么翻车的），而且不给任何报错。
+_FONT_DIR = ROOT / "packaging" / "fonts"
+_FONT_NEEDED = ("NotoSansSC-Regular.otf", "NotoSansMono-Regular.ttf")
+_missing = [n for n in _FONT_NEEDED if not (_FONT_DIR / n).exists()]
+if _missing:
+    raise SystemExit(f"缺少 HUD 字体 {_missing}（应在 {_FONT_DIR}）—— "
+                     "先跑 packaging/build.py，它会自动下载")
+datas.append((str(_FONT_DIR), "fonts"))
+if not (_FONT_DIR / "LICENSE-OFL.txt").exists():
+    print("⚠ 没有 OFL 授权原文，发包前补一份（fonts/LICENSE-OFL.txt）")
+
 a = Analysis(                          # noqa: F821
     [str(ROOT / "packaging" / "entry.py")],
     pathex=[str(ROOT)],                # 让 PyInstaller 找得到仓库根的 analyze.py

@@ -15,3 +15,23 @@
 关于许可证范围：本程序与 FFmpeg 是两个彼此独立的程序 —— 本程序只是**调用**
 ffmpeg 这个命令行程序（不链接它的库，也不把它嵌进自己的可执行文件），
 因此本程序自身不受 FFmpeg 的 GPL 约束。
+
+
+本程序内置了字体
+================
+
+包里的 fonts/ 目录放了两份字体，用来渲染 HUD（叠加视频）上的文字和计时数字。
+自己带一份，是因为系统字体各平台、各语言版本都不一样，缺字体的时候文字会
+小到看不清；自带就能保证所有用户看到的画面一致。
+
+  Noto Sans SC Regular    —— 中文标签
+  Noto Sans Mono Regular  —— 计时数字（等宽，数字跳动时不会左右晃）
+
+  版权归 Adobe / Google 所有，保留字体名（Reserved Font Name）
+  许可证：SIL Open Font License 1.1 —— 允许随程序一起分发
+  完整许可证原文：包内 fonts/LICENSE-OFL.txt
+  项目主页：https://github.com/notofonts/noto-cjk
+            https://github.com/notofonts/noto-fonts
+
+为什么不用微软雅黑 / Consolas：那些是微软的专有字体，授权不允许跟着别人的
+程序一起分发。只有像上面这种开源字体才能这么用。

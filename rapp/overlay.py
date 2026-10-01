@@ -113,6 +113,15 @@ _MONO_LINUX = [
 _SANS_BY_PLATFORM = {"nt": _SANS_WINDOWS, "darwin": _SANS_MACOS, "linux": _SANS_LINUX}
 _MONO_BY_PLATFORM = {"nt": _MONO_WINDOWS, "darwin": _MONO_MACOS, "linux": _MONO_LINUX}
 
+_BUNDLED_SANS = ["NotoSansSC-Regular.otf"]
+_BUNDLED_MONO = ["NotoSansMono-Regular.ttf"]
+"""构建时打进包里的字体（由 packaging/build.py 下载）。
+
+**排在最前面**：只要包里有就一律用它 —— 这样用户装了什么字体都不影响输出，
+各平台也长得一模一样，Windows 上的画面和我在 mac 上看到的完全一致。
+只有源码模式下没跑过打包（`packaging/fonts/` 不存在）才回退到系统字体。
+"""
+
 
 def _platform_key() -> str:
     if os.name == "nt":
@@ -130,17 +139,36 @@ def _ordered(by_platform: dict[str, list[str]]) -> list[str]:
     return out
 
 
-_FONT_NAMES = _ordered(_SANS_BY_PLATFORM)
-_MONO_NAMES = _ordered(_MONO_BY_PLATFORM)
+_FONT_NAMES = _BUNDLED_SANS + _ordered(_SANS_BY_PLATFORM)
+_MONO_NAMES = _BUNDLED_MONO + _ordered(_MONO_BY_PLATFORM)
 # 扫目录兜底时，按文件名猜的关键字（按优先级）
 _SANS_HINTS = ("msyh", "yahei", "simhei", "heiti", "notosanscjk", "sourcehan",
                "pingfang", "hiragino", "arial", "dejavu")
 _MONO_HINTS = ("consol", "lucon", "cour", "mono", "menlo", "sfns")
 
 
+def _bundled_font_dir() -> Path | None:
+    """包里自带的那份字体在哪。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        d = Path(meipass) / "fonts"           # PyInstaller 解到 _MEIPASS/fonts
+        if d.is_dir():
+            return d
+    # 源码模式：直接用构建时下好的那份，让本地和打出来的包行为一致
+    d = Path(__file__).resolve().parent.parent / "packaging" / "fonts"
+    return d if d.is_dir() else None
+
+
 def _font_dirs() -> list[Path]:
-    """各平台放字体的目录。Windows 的系统盘未必是 C:，所以读环境变量。"""
+    """找字体的目录。
+
+    顺序很要紧：**包内自带的排第一**，然后才是本平台 / 其他平台的系统字体
+    （Windows 的系统盘未必是 C:，所以读环境变量）。
+    """
     dirs: list[Path] = []
+    bundled = _bundled_font_dir()
+    if bundled:
+        dirs.append(bundled)
     if os.name == "nt":
         dirs.append(Path(os.environ.get("WINDIR") or r"C:\Windows") / "Fonts")
         local = os.environ.get("LOCALAPPDATA")

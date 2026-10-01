@@ -24,8 +24,11 @@ Windows 上一个都不存在 → 整块 HUD 的字都成了 11 px 的小点。
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from rapp import overlay
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 def _tap_height(font) -> float:
@@ -76,6 +79,28 @@ def test_windows_candidates_are_present() -> None:
     assert "consolab.ttf" in overlay._MONO_NAMES, "候选表里没有 Consolas"
 
 
+def test_bundled_fonts_come_first() -> None:
+    """包里自带的字体必须排在系统字体前面。
+
+    排第一，才能保证不管用户机器上装了什么字体，输出都一样 —— 这也让
+    "在 mac 上测过"真正等于"Windows 上也是这个样子"。
+    """
+    assert overlay._FONT_NAMES[0] == "NotoSansSC-Regular.otf"
+    assert overlay._MONO_NAMES[0] == "NotoSansMono-Regular.ttf"
+
+
+def test_bundled_fonts_are_actually_used() -> None:
+    """下好字体之后，真正选中的必须是包里那份。"""
+    fonts_dir = ROOT / "packaging" / "fonts"
+    if not (fonts_dir / "NotoSansSC-Regular.otf").exists():
+        return          # 还没构建过 —— 源码模式下用系统字体，这是预期内的
+    got = overlay._find_font(overlay._FONT_NAMES, overlay._SANS_HINTS)
+    assert got == str(fonts_dir / "NotoSansSC-Regular.otf"), \
+        f"包里有字体却没用它，选中了 {got}"
+    assert (fonts_dir / "LICENSE-OFL.txt").exists(), \
+        "OFL 要求分发字体时附上授权原文（fonts/LICENSE-OFL.txt）"
+
+
 def main() -> int:
     failed = 0
 
@@ -110,6 +135,17 @@ def main() -> int:
     else:
         print("✗ Windows 的字体候选被删了")
         failed += 1
+
+    fonts_dir = ROOT / "packaging" / "fonts"
+    if (fonts_dir / "NotoSansSC-Regular.otf").exists():
+        used = overlay._find_font(overlay._FONT_NAMES, overlay._SANS_HINTS)
+        if used == str(fonts_dir / "NotoSansSC-Regular.otf"):
+            print("✓ 用的是包里自带的字体（不依赖用户装了什么）")
+        else:
+            print(f"✗ 包里有字体却没用它，选中了 {used}")
+            failed += 1
+    else:
+        print("· 包里还没下字体（构建时会下）—— 源码模式用系统字体")
 
     print()
     print("全部通过 ✓" if not failed else f"有 {failed} 项失败 ✗")

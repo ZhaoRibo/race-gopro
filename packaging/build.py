@@ -38,6 +38,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "packaging"
 FFMPEG_DIR = PKG / "ffmpeg"
+FONT_DIR = PKG / "fonts"
 DIST = ROOT / "dist"
 
 # Windows 上的 stdout 不是 UTF-8，而是本地代码页（英文系统就是 cp1252）。
@@ -54,7 +55,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):      # 流被换成不支持重配置的（比如某些管道）
         pass
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 """版本号。改这里就够了（会写进 macOS 的 Info.plist 和产物文件名）。
 和 `rapp/__init__.py` 里的 `__version__` 保持一致。"""
 
@@ -172,6 +173,80 @@ def _windows_sources() -> list[tuple[str, str]]:
     return [
         ("both", "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"),
     ]
+
+
+# ==========================================================================
+# 字体：HUD 的文字全靠它，必须自己带一份
+# ==========================================================================
+# 为什么打包字体：HUD 上的文字是 PIL 用**系统字体文件**画出来的，而每个平台
+# 有哪些字体完全不由我们决定。一个都找不到时，PIL 会静默退回内置的 11 px
+# 位图字体 —— 不报错、不告警，只是字突然变得极小（v0.1.4 的 Windows 包就是
+# 这么翻车的）。自己带一份，输出就跟用户装了什么字体无关，各平台也长得一样。
+#
+# 只能带**允许再分发**的开源字体：这里是 Noto Sans SC（中文标签）和
+# Noto Sans Mono（计时数字），都是 SIL OFL 1.1。微软雅黑 / Consolas 这类系统
+# 字体是专有的，授权不允许跟着别人的程序走。
+_FONT_SOURCES = {
+    # 目标文件名 → jsDelivr 的 gh 通道路径
+    "NotoSansSC-Regular.otf":
+        "gh/notofonts/noto-cjk@main/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
+    "NotoSansMono-Regular.ttf":
+        "gh/notofonts/noto-fonts@main/hinted/ttf/NotoSansMono/NotoSansMono-Regular.ttf",
+    "LICENSE-OFL.txt": "gh/notofonts/noto-cjk@main/Sans/LICENSE",
+}
+
+_CDN_HOSTS = ("cdn.jsdelivr.net", "fastly.jsdelivr.net",
+              "gcore.jsdelivr.net", "testingcf.jsdelivr.net")
+"""jsDelivr 有多个域名，被墙的往往只是其中一个，挨个试。
+
+实测：主域名 cdn.jsdelivr.net 在国内直接 DNS 失败，fastly 那个却几秒就下完了。
+GitHub 自己也不行 —— raw.githubusercontent.com 連不上（Release 附件走的是
+objects.githubusercontent.com，那个倒是通的）。"""
+
+_FONT_FILES = ("NotoSansSC-Regular.otf", "NotoSansMono-Regular.ttf")
+
+
+def _download_mirrored(path: str, dest: Path, min_bytes: int) -> Path:
+    """从若干个 CDN 镜像里挑一个能用的把文件下下来。"""
+    if dest.exists() and dest.stat().st_size >= min_bytes:
+        return dest
+    last = ""
+    for host in _CDN_HOSTS:
+        try:
+            _download(f"https://{host}/{path}", dest)
+            if dest.stat().st_size >= min_bytes:
+                return dest
+            last = f"{host} 只返回了 {dest.stat().st_size} 字节"
+        except RuntimeError as exc:
+            last = f"{host}：{str(exc).splitlines()[-1][:100]}"
+            print(f"  … {last}")
+        dest.unlink(missing_ok=True)
+    raise SystemExit(f"字体下载失败，最后试的是 {last}")
+
+
+def fetch_fonts() -> None:
+    """把 HUD 要用的字体下好，放进 packaging/fonts/（会被打进包里）。"""
+    FONT_DIR.mkdir(parents=True, exist_ok=True)
+    if all((FONT_DIR / n).exists() for n in _FONT_FILES):
+        print("字体已经下好了，跳过")
+    else:
+        print("准备 HUD 用的字体（开源字体，约 9 MB，之后会缓存）")
+        for name, path in _FONT_SOURCES.items():
+            _download_mirrored(path, FONT_DIR / name, 2000)
+
+    # 下完必须真的能用 —— 和 ffmpeg 那个 `-version` 自检一个道理：
+    # 宁可构建时炸掉，也不要用户拿到一个字体坏掉、字小到看不见的包。
+    from PIL import ImageFont
+
+    for name in _FONT_FILES:
+        p = FONT_DIR / name
+        try:
+            ImageFont.truetype(str(p), 32)
+        except OSError as exc:
+            raise SystemExit(f"{p} 打不开，字体可能下坏了：{exc}") from exc
+        print(f"  ✓ {name}（{p.stat().st_size / 1e6:.1f} MB）")
+    if not (FONT_DIR / "LICENSE-OFL.txt").exists():
+        print("  ⚠ 没拿到 OFL 授权原文，发包前补一份（fonts/LICENSE-OFL.txt）")
 
 
 def fetch_ffmpeg() -> None:
@@ -384,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"平台：{sys.platform} / {platform.machine()}   版本：{VERSION}\n")
     if not args.skip_ffmpeg:
         fetch_ffmpeg()
+    fetch_fonts()
     warm_matplotlib_cache()
     print()
     run_pyinstaller(clean=not args.no_clean)

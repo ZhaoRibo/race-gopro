@@ -610,7 +610,8 @@ race-gopro/
 │   ├── build.py         一键：下 ffmpeg → PyInstaller → 压 zip
 │   ├── race-gopro.spec  PyInstaller 配置（怎么装包、Info.plist 写什么）
 │   ├── entry.py         打包用的入口脚本
-│   └── ffmpeg/          下载缓存的静态 ffmpeg（不进仓库，200 MB）
+│   ├── ffmpeg/          下载缓存的静态 ffmpeg（不进仓库，200 MB）
+│   └── fonts/           下载缓存的开源字体（不进仓库，约 9 MB）
 ├── .github/workflows/   CI：打 tag 自动出 mac + win 两个包并挂 Release
 ├── rapp/                算法全在这个包里
 │   ├── gpmf.py          GPMF 二进制解析（相当于 open()）
@@ -934,6 +935,16 @@ CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展
   `%WINDIR%\Fonts`，不写死 C:），找不到还会扫字体目录，实在不行也退到**可缩放**的
   `load_default(size=…)`。每次出片会先打印一行选中的字体，排问题先看那行：
   `HUD 字体：正文 xxx ／ 数字 xxx`；`tests/test_hud_fonts.py` 盯着这条底线。
+- **字体是打进包里的**（`packaging/build.py` 下到 `packaging/fonts/`，spec 再塞进
+  包内 `fonts/`）。用的是 **Noto Sans SC + Noto Sans Mono**：SIL OFL 1.1 授权
+  允许随程序分发 —— **微软雅黑 / Consolas 不行**，那是微软的专有字体，授权不允许
+  跟着别人的程序走。自带的好处是不管用户机器上装了什么，输出都一样
+  （“在 mac 上测过”就等于“Windows 上也是这样”）。
+  `packaging/fonts/LICENSE-OFL.txt` 是必须随字体附上的授权原文，**删它之前先看条款**。
+- 字体走 **jsDelivr** 下（多个镜像域名挨个试）：实测主域名 `cdn.jsdelivr.net`
+  在国内 DNS 直接失败，而 `raw.githubusercontent.com` 也連不上 —— 但
+  `fastly.jsdelivr.net` 很快。（GitHub 的 Release 附件走
+  `objects.githubusercontent.com`，那个是通的，可以当备用方案。）
 - **资源路径**：包里的 ffmpeg 在 `sys._MEIPASS/bin`，用户数据（最近打开过的视频、
   日志）在系统的用户数据目录 —— `.app` 是只读的，不能往自己里面写。
   这些分支都在 `rapp/app.py` 开头那几个函数里。
