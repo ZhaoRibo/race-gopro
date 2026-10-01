@@ -79,26 +79,34 @@ def test_windows_candidates_are_present() -> None:
     assert "consolab.ttf" in overlay._MONO_NAMES, "候选表里没有 Consolas"
 
 
-def test_bundled_fonts_come_first() -> None:
-    """包里自带的字体必须排在系统字体前面。
+def test_bundled_fonts_dont_hijack_system_fonts() -> None:
+    """自带的字体必须排在最后，不能抢系统字体的位置。
 
-    排第一，才能保证不管用户机器上装了什么字体，输出都一样 —— 这也让
-    "在 mac 上测过"真正等于"Windows 上也是这个样子"。
+    平台自带的字更好看（macOS 的 Hiragino、Windows 的微软雅黑），而且 HUD 的
+    版面当初就是按它们的度量调的。自带那份只在“系统里一个都没有”时才上场。
+    （v0.1.6 第一版把它们排在了最前面，结果 mac 上的字也变了，观感明显变差。）
     """
-    assert overlay._FONT_NAMES[0] == "NotoSansSC-Regular.otf"
-    assert overlay._MONO_NAMES[0] == "NotoSansMono-Regular.ttf"
+    assert overlay._FONT_NAMES[-1] == "NotoSansSC-Regular.otf"
+    assert overlay._MONO_NAMES[-1] == "NotoSansMono-Regular.ttf"
 
 
-def test_bundled_fonts_are_actually_used() -> None:
-    """下好字体之后，真正选中的必须是包里那份。"""
-    fonts_dir = ROOT / "packaging" / "fonts"
-    if not (fonts_dir / "NotoSansSC-Regular.otf").exists():
-        return          # 还没构建过 —— 源码模式下用系统字体，这是预期内的
-    got = overlay._find_font(overlay._FONT_NAMES, overlay._SANS_HINTS)
-    assert got == str(fonts_dir / "NotoSansSC-Regular.otf"), \
-        f"包里有字体却没用它，选中了 {got}"
-    assert (fonts_dir / "LICENSE-OFL.txt").exists(), \
-        "OFL 要求分发字体时附上授权原文（fonts/LICENSE-OFL.txt）"
+def test_bundled_font_is_the_last_resort() -> None:
+    """
+    系统字体一个都找不到时，必须轮到包内自带的那份 —— 这才是它存在的理由。
+
+    做法：把字体目录换成“只有包内目录”（等价于系统里什么字体都没有），
+    看能不能挑出 Noto —— 这正是 v0.1.4 的 Windows 机器上的情形。
+    """
+    bundled = overlay._bundled_font_dir()
+    if bundled is None or not (bundled / "NotoSansSC-Regular.otf").exists():
+        return              # 还没跑过构建、没下字体，跳过
+    saved = overlay._font_dirs
+    overlay._font_dirs = lambda: [bundled]
+    try:
+        got = overlay._find_font(overlay._FONT_NAMES, overlay._SANS_HINTS)
+    finally:
+        overlay._font_dirs = saved
+    assert got == str(bundled / "NotoSansSC-Regular.otf"), f"兜底失败，选中了 {got}"
 
 
 def main() -> int:
@@ -138,14 +146,24 @@ def main() -> int:
 
     fonts_dir = ROOT / "packaging" / "fonts"
     if (fonts_dir / "NotoSansSC-Regular.otf").exists():
-        used = overlay._find_font(overlay._FONT_NAMES, overlay._SANS_HINTS)
-        if used == str(fonts_dir / "NotoSansSC-Regular.otf"):
-            print("✓ 用的是包里自带的字体（不依赖用户装了什么）")
+        saved = overlay._font_dirs
+        overlay._font_dirs = lambda: [fonts_dir]
+        try:
+            got = overlay._find_font(overlay._FONT_NAMES, overlay._SANS_HINTS)
+        finally:
+            overlay._font_dirs = saved
+        if got == str(fonts_dir / "NotoSansSC-Regular.otf"):
+            print("✓ 系统里没有字体时，包内自带的能兜住")
         else:
-            print(f"✗ 包里有字体却没用它，选中了 {used}")
+            print(f"✗ 兜底失败，选中了 {got}")
+            failed += 1
+        if (fonts_dir / "LICENSE-OFL.txt").exists():
+            print("✓ OFL 授权原文随字体一起在包里")
+        else:
+            print("✗ 缺 OFL 授权原文（发包前要补）")
             failed += 1
     else:
-        print("· 包里还没下字体（构建时会下）—— 源码模式用系统字体")
+        print("· 包里还没下字体（构建时会下）")
 
     print()
     print("全部通过 ✓" if not failed else f"有 {failed} 项失败 ✗")

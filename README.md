@@ -936,10 +936,12 @@ CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展
   `load_default(size=…)`。每次出片会先打印一行选中的字体，排问题先看那行：
   `HUD 字体：正文 xxx ／ 数字 xxx`；`tests/test_hud_fonts.py` 盯着这条底线。
 - **字体是打进包里的**（`packaging/build.py` 下到 `packaging/fonts/`，spec 再塞进
-  包内 `fonts/`）。用的是 **Noto Sans SC + Noto Sans Mono**：SIL OFL 1.1 授权
-  允许随程序分发 —— **微软雅黑 / Consolas 不行**，那是微软的专有字体，授权不允许
-  跟着别人的程序走。自带的好处是不管用户机器上装了什么，输出都一样
-  （“在 mac 上测过”就等于“Windows 上也是这样”）。
+  包内 `fonts/`），但**只当保底**：平台自带的字体更好看（macOS 的 Hiragino、
+  Windows 的微软雅黑），而且 HUD 版面当初就是按它们的度量调的，所以系统字体优先，
+  自带那份只在“系统里一个都没有”时上场 —— 正是 v0.1.4 的 Windows 机器上的情形。
+  ⚠ **别把自带字体挪到候选表最前面**：那样 mac 的字也会被换掉，观感明显变差（试过）。
+  用的是 **Noto Sans SC + Noto Sans Mono**：SIL OFL 1.1 授权允许随程序分发 ——
+  **微软雅黑 / Consolas 不行**，那是微软的专有字体，授权不允许跟着别人的程序走。
   `packaging/fonts/LICENSE-OFL.txt` 是必须随字体附上的授权原文，**删它之前先看条款**。
 - 字体走 **jsDelivr** 下（多个镜像域名挨个试）：实测主域名 `cdn.jsdelivr.net`
   在国内 DNS 直接失败，而 `raw.githubusercontent.com` 也連不上 —— 但

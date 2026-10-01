@@ -115,11 +115,13 @@ _MONO_BY_PLATFORM = {"nt": _MONO_WINDOWS, "darwin": _MONO_MACOS, "linux": _MONO_
 
 _BUNDLED_SANS = ["NotoSansSC-Regular.otf"]
 _BUNDLED_MONO = ["NotoSansMono-Regular.ttf"]
-"""构建时打进包里的字体（由 packaging/build.py 下载）。
+"""构建时打进包里的字体（由 packaging/build.py 下载），**排在最后当保底**。
 
-**排在最前面**：只要包里有就一律用它 —— 这样用户装了什么字体都不影响输出，
-各平台也长得一模一样，Windows 上的画面和我在 mac 上看到的完全一致。
-只有源码模式下没跑过打包（`packaging/fonts/` 不存在）才回退到系统字体。
+为什么不排在前面：平台自带的那几个字更好看 —— macOS 的 Hiragino、Windows 的
+微软雅黑都是各自系统里调好的字体，HUD 的版面当初也是按它们的度量调的。
+自带这份的意义是“**一定兜得住**”：系统里一个字体都找不到时（v0.1.4 的 Windows
+现场就是这样）不至于退到那个 11 px 的位图字体。
+代价：各平台的字不完全一样。真想完全一致，把这两个列表挪到最前面就行。
 """
 
 
@@ -139,8 +141,8 @@ def _ordered(by_platform: dict[str, list[str]]) -> list[str]:
     return out
 
 
-_FONT_NAMES = _BUNDLED_SANS + _ordered(_SANS_BY_PLATFORM)
-_MONO_NAMES = _BUNDLED_MONO + _ordered(_MONO_BY_PLATFORM)
+_FONT_NAMES = _ordered(_SANS_BY_PLATFORM) + _BUNDLED_SANS
+_MONO_NAMES = _ordered(_MONO_BY_PLATFORM) + _BUNDLED_MONO
 # 扫目录兜底时，按文件名猜的关键字（按优先级）
 _SANS_HINTS = ("msyh", "yahei", "simhei", "heiti", "notosanscjk", "sourcehan",
                "pingfang", "hiragino", "arial", "dejavu")
@@ -162,13 +164,10 @@ def _bundled_font_dir() -> Path | None:
 def _font_dirs() -> list[Path]:
     """找字体的目录。
 
-    顺序很要紧：**包内自带的排第一**，然后才是本平台 / 其他平台的系统字体
-    （Windows 的系统盘未必是 C:，所以读环境变量）。
+    包内自带的那份也一并列进来（它排在最后当保底）；Windows 的系统盘未必是 C:，
+    所以读环境变量。
     """
     dirs: list[Path] = []
-    bundled = _bundled_font_dir()
-    if bundled:
-        dirs.append(bundled)
     if os.name == "nt":
         dirs.append(Path(os.environ.get("WINDIR") or r"C:\Windows") / "Fonts")
         local = os.environ.get("LOCALAPPDATA")
@@ -183,6 +182,9 @@ def _font_dirs() -> list[Path]:
             Path("/usr/share/fonts"),
             Path("/usr/local/share/fonts"),
         ]
+    bundled = _bundled_font_dir()
+    if bundled:
+        dirs.append(bundled)           # 保底，排在系统目录后面
     return [d for d in dirs if d.is_dir()]
 
 
