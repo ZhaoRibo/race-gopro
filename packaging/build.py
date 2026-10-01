@@ -54,7 +54,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):      # 流被换成不支持重配置的（比如某些管道）
         pass
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 """版本号。改这里就够了（会写进 macOS 的 Info.plist 和产物文件名）。
 和 `rapp/__init__.py` 里的 `__version__` 保持一致。"""
 

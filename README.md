@@ -631,7 +631,8 @@ race-gopro/
     ├── test_gpmf.py                   GPMF 解析器回归测试
     ├── test_paths.py                  文件名的跨平台检查（防 Windows checkout 失败）
     ├── test_no_console.py             无控制台启动检查（防 Windows 打包版一启动就弹窗）
-    └── test_subprocess_hygiene.py     子进程检查（防 Windows 上每点一下闪一个黑框）
+    ├── test_subprocess_hygiene.py     子进程检查（防 Windows 上每点一下闪一个黑框）
+    └── test_hud_fonts.py              HUD 字体检查（防字体悄悄退化成 11px 位图）
 ```
 
 数据在包里是这么往下流的（想加功能就沿着这条链找）：
@@ -719,6 +720,14 @@ macOS 允许文件名里带反斜杠、末尾带空格，Windows 不允许 —�
 
 ```bash
 .venv/bin/python -m tests.test_subprocess_hygiene
+```
+
+`tests/test_hud_fonts.py` 盯的是 HUD 的字体：**字大不大，完全取决于能不能加载到
+一个真正的字体文件**。一个都加载不了时，PIL 会退回内置位图字体（固定 11 px、
+不能缩放），画在 4K 画面上就是"字小到几乎看不见"。
+
+```bash
+.venv/bin/python -m tests.test_hud_fonts
 ```
 
 想用 pytest 的话得先装（它不在运行依赖里）：
@@ -918,6 +927,13 @@ CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展
   `ShowDialog()`），否则对话框会躲在浏览器后面：那个进程既没控制台、也没前台窗口
   可依附，Windows 就不会把它激活到最前面，用户看到的就是"点了没反应"（v0.1.3
   实测）。那个 owner 窗体必须 `TopMost`，测试里也有一条盯着它。
+- **HUD 的字体必须真的加载到**，否则整块 HUD 会“字小到看不见”。PIL 在
+  `truetype` 失败时会退回**内置位图字体**（固定 11 px、不能缩放）—— 不报错、
+  不告警，只是字变小了，所以要特别小心。v0.1.4 的 Windows 包就是这么翻车的：
+  候选表里全是 mac / Linux 的路径。现在按平台分开列（Windows 用
+  `%WINDIR%\Fonts`，不写死 C:），找不到还会扫字体目录，实在不行也退到**可缩放**的
+  `load_default(size=…)`。每次出片会先打印一行选中的字体，排问题先看那行：
+  `HUD 字体：正文 xxx ／ 数字 xxx`；`tests/test_hud_fonts.py` 盯着这条底线。
 - **资源路径**：包里的 ffmpeg 在 `sys._MEIPASS/bin`，用户数据（最近打开过的视频、
   日志）在系统的用户数据目录 —— `.app` 是只读的，不能往自己里面写。
   这些分支都在 `rapp/app.py` 开头那几个函数里。

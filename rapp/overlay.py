@@ -33,6 +33,7 @@ HUD 布局（以 1080p 为基准，其它分辨率按高度等比缩放）
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -61,60 +62,174 @@ _PANEL = (8, 12, 18, 150)
 # **不含 CJK 字形**，PIL 也不会自动回退，中文会被画成空白或豆腐块 ——
 # 实测同一串“最快圈”：Arial 只有 618 个墨点，Hiragino 有 3873。
 # 拉丁字母交给它们渲染也很干净，而大号数字走下面的等宽字体，不受影响。
-_FONT_CANDIDATES = [
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/STHeiti Medium.ttc",
-    "/System/Library/Fonts/PingFang.ttc",
-    "/System/Library/Fonts/Supplemental/Songti.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-    # 退路：一个 CJK 字体都没有时，至少保证拉丁字母可读（中文会变方块）
-    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/System/Library/Fonts/SFNS.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+#
+# ⚠ 顺序和平台都很要紧：候选里**一个都加载不了**的时候，PIL 会退回到内置的
+# 位图字体（固定 11 px、不能缩放），画到 4K 画面上就是“字小到几乎看不见”。
+# v0.1.4 的 Windows 包正是这么翻车的 —— 当时这张表里全是 mac / Linux 路径。
+# 所以现在：① 按平台真实路径找（Windows 的系统盘未必是 C:，读 WINDIR）；
+# ② 找不到就扫字体目录按文件名猜；③ 再不行也要退到**可缩放**的字体。
+# 按平台分开列，**本平台的必须排最前**。
+# 为什么强调顺序：macOS 上 `~/Library/Fonts` 里可能恰好躺着一个叫 simhei.ttf 的
+# 字体（用户自己装的），要是把 Windows 那批名字排在前面，mac 上就会去用那个 ——
+# 而 HUD 的版面是按 Hiragino 的度量调过的，换字体会让版面变样。
+_SANS_WINDOWS = [
+    "msyhbd.ttc", "msyh.ttc",              # 微软雅黑（粗 / 常规）
+    "simhei.ttf",                           # 黑体
+    "msjhbd.ttc", "msjh.ttc",               # 微软正黑（繁体，同样含汉字）
+    "simsunb.ttf", "simsun.ttc",            # 宋体
+    "msyi.ttf",                             # 等线
+    "YuGothB.ttc", "YugothB.ttc",           # 日文哥特体（汉字同源，能用）
+    "arialbd.ttf", "arial.ttf",             # 纯拉丁：中文会变方块，但至少能读
 ]
-_MONO_CANDIDATES = [
-    "/System/Library/Fonts/SFNSMono.ttf",
-    "/System/Library/Fonts/Menlo.ttc",
-    "/System/Library/Fonts/Supplemental/Courier New Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+_SANS_MACOS = [
+    "Hiragino Sans GB.ttc",
+    "STHeiti Medium.ttc",
+    "PingFang.ttc",
+    "Supplemental/Songti.ttc",
+    "Supplemental/Arial Bold.ttf",
+    "Helvetica.ttc",
+    "SFNS.ttf",
+]
+_SANS_LINUX = [
+    "opentype/noto/NotoSansCJK-Bold.ttc",
+    "truetype/wqy/wqy-zenhei.ttc",
+    "truetype/dejavu/DejaVuSans-Bold.ttf",
+]
+# 大号数字走等宽，计时器跳动时才不会左右抖 —— 所以这几个必须找得到
+_MONO_WINDOWS = [
+    "consolab.ttf", "consola.ttf",          # Consolas（Windows 自带）
+    "lucon.ttf",                             # Lucida Console
+    "courbd.ttf", "cour.ttf",                # Courier New
+]
+_MONO_MACOS = [
+    "SFNSMono.ttf",
+    "Menlo.ttc",
+    "Supplemental/Courier New Bold.ttf",
+]
+_MONO_LINUX = [
+    "truetype/dejavu/DejaVuSansMono-Bold.ttf",
 ]
 
+_SANS_BY_PLATFORM = {"nt": _SANS_WINDOWS, "darwin": _SANS_MACOS, "linux": _SANS_LINUX}
+_MONO_BY_PLATFORM = {"nt": _MONO_WINDOWS, "darwin": _MONO_MACOS, "linux": _MONO_LINUX}
 
-def _find_font(candidates: list[str]) -> str | None:
-    """返回第一个**真的能加载**的字体路径。
+
+def _platform_key() -> str:
+    if os.name == "nt":
+        return "nt"
+    return "darwin" if sys.platform == "darwin" else "linux"
+
+
+def _ordered(by_platform: dict[str, list[str]]) -> list[str]:
+    """本平台的候选排最前，其他平台跟在后面兜底（路径不存在会自动跳过）。"""
+    key = _platform_key()
+    out = list(by_platform[key])
+    for other, names in by_platform.items():
+        if other != key:
+            out += names
+    return out
+
+
+_FONT_NAMES = _ordered(_SANS_BY_PLATFORM)
+_MONO_NAMES = _ordered(_MONO_BY_PLATFORM)
+# 扫目录兜底时，按文件名猜的关键字（按优先级）
+_SANS_HINTS = ("msyh", "yahei", "simhei", "heiti", "notosanscjk", "sourcehan",
+               "pingfang", "hiragino", "arial", "dejavu")
+_MONO_HINTS = ("consol", "lucon", "cour", "mono", "menlo", "sfns")
+
+
+def _font_dirs() -> list[Path]:
+    """各平台放字体的目录。Windows 的系统盘未必是 C:，所以读环境变量。"""
+    dirs: list[Path] = []
+    if os.name == "nt":
+        dirs.append(Path(os.environ.get("WINDIR") or r"C:\Windows") / "Fonts")
+        local = os.environ.get("LOCALAPPDATA")
+        if local:                      # 用户自己装的字体放这儿，也要找
+            dirs.append(Path(local) / "Microsoft" / "Windows" / "Fonts")
+    else:
+        dirs += [
+            Path("/System/Library/Fonts"),
+            Path("/System/Library/Fonts/Supplemental"),
+            Path("/Library/Fonts"),
+            Path.home() / "Library/Fonts",
+            Path("/usr/share/fonts"),
+            Path("/usr/local/share/fonts"),
+        ]
+    return [d for d in dirs if d.is_dir()]
+
+
+def _loadable(path: Path) -> bool:
+    """能不能真的加载出来。
 
     只判断文件存在还不够：损坏的文件或打不开的 ttc 会让 PIL 报错，
-    从而静默退化成内置位图字体（又小又丑）。先试加载一次再认定。
+    从而静默退化成那个又小又丑的位图字体。先试加载一次再认定。
     """
-    for c in candidates:
-        if not Path(c).exists():
-            continue
-        try:
-            ImageFont.truetype(c, 32)
-        except OSError:
-            continue
-        return c
+    try:
+        ImageFont.truetype(str(path), 32)
+    except OSError:
+        return False
+    return True
+
+
+def _find_font(names: list[str], hints: tuple[str, ...]) -> str | None:
+    """先按写死的名字找，再扫字体目录按关键字猜。都不行返回 None。"""
+    dirs = _font_dirs()
+    for name in names:
+        for d in dirs:
+            p = d / name
+            if p.exists() and _loadable(p):
+                return str(p)
+
+    files: list[Path] = []
+    for d in dirs:
+        files += list(d.rglob("*.tt[cf]"))
+    for hint in hints:
+        for p in files:
+            if hint in p.name.lower().replace(" ", "") and _loadable(p):
+                return str(p)
     return None
+
+
+def _default_font(size: int):
+    """
+    一个字体都没找着时的兜底。
+
+    关键：**必须传 size**。不传的话 PIL 给的是固定 11 px 的内置位图字体，
+    画在 4K 画面上等于看不见（v0.1.4 的 Windows 包就是这么翻车的）。
+    Pillow ≥ 10.1 的 `load_default(size=...)` 返回的是可缩放的字体，
+    中文仍会缺字形，但至少字号是对的。
+    """
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:                  # 老版本 Pillow 没有 size 参数
+        return ImageFont.load_default()
 
 
 class _Fonts:
     """按字号缓存字体对象（PIL 每次新建 ImageFont 都有开销）。"""
 
     def __init__(self) -> None:
-        self._sans = _find_font(_FONT_CANDIDATES)
-        self._mono = _find_font(_MONO_CANDIDATES) or self._sans
+        self._sans = _find_font(_FONT_NAMES, _SANS_HINTS)
+        self._mono = _find_font(_MONO_NAMES, _MONO_HINTS) or self._sans
         self._cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
+        # 这一行是排 Windows 上“字特别小”那类问题的第一手线索，别删
+        print(f"  HUD 字体：正文 {Path(self._sans).name if self._sans else '（兜底）'}"
+              f" ／ 数字 {Path(self._mono).name if self._mono else '（兜底）'}"
+              f"（共 {len(_font_dirs())} 个字体目录）", flush=True)
+        if not self._sans or not self._mono:
+            print("  ⚠ 没找到可缩放的字体，HUD 文字会退到兜底字体"
+                  "（中文可能显示成方块）。装一个中文字体会好很多："
+                  "Windows 装「微软雅黑」、Linux 装 Noto Sans CJK。", flush=True)
 
     def get(self, size: int, mono: bool = False):
         key = ("mono" if mono else "sans", max(8, int(size)))
         if key not in self._cache:
             path = self._mono if mono else self._sans
             try:
-                self._cache[key] = ImageFont.truetype(path, key[1]) if path else ImageFont.load_default()
+                self._cache[key] = (ImageFont.truetype(path, key[1]) if path
+                                    else _default_font(key[1]))
             except OSError:
-                self._cache[key] = ImageFont.load_default()
+                self._cache[key] = _default_font(key[1])
         return self._cache[key]
 
 
