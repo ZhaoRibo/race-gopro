@@ -444,7 +444,10 @@ def render_hud_frame(
     # ------------------------------------------------------------------
     # 左上：圈号 / 本圈计时 / 与最快圈的差距
     # ------------------------------------------------------------------
-    panel_w, panel_h = px(566), px(238)
+    # 高度 264 是算出来的，不是拍脑袋：内容是 LAP 行 / 大字号计时 / 差值 /
+    # “最快圈”四行，最后一行必须离下沿留出与顶部相当的空白 —— 原来是 238，
+    # 底部那行的墨迹下沿正好顶到框底（留白≈0），看上去头轻脚重。
+    panel_w, panel_h = px(566), px(264)
     base.alpha_composite(_rounded_panel((panel_w, panel_h), px(18), _PANEL), (M, M))
 
     x0, y0 = M + px(28), M + px(20)
@@ -465,8 +468,13 @@ def render_hud_frame(
         d.text((x0, y0 + px(30)), "OUT LAP", font=fonts.get(px(58), mono=True), fill=_AMBER)
 
     if best is not None:
-        d.text((x0, y0 + panel_h - px(52)), f"最快圈  {laps.format_lap_time(best.duration)}",
-               font=fonts.get(px(26)), fill=_DIM)
+        # 按**墨迹**定位，不写死像素偏移：中文字体的 ascent / descent 各不相同
+        # （Hiragino 和微软雅黑的下沿就不一样），写死偏移换个字体就会贴到框底。
+        # 目标是“字的下沿离面板下沿 = px(26)”，与顶部 LAP 那行的上留白相当。
+        txt = f"最快圈  {laps.format_lap_time(best.duration)}"
+        f_best = fonts.get(px(26))
+        ink = d.textbbox((0, 0), txt, font=f_best)
+        d.text((x0, M + panel_h - px(26) - ink[3]), txt, font=f_best, fill=_DIM)
 
     # ------------------------------------------------------------------
     # 右下：时速
