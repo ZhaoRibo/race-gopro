@@ -35,6 +35,10 @@ import sys
 import zipfile
 from pathlib import Path
 
+from icon import make_icons
+"""图标是代码画出来的（见 packaging/icon.py）：mac 要 .icns、Windows 要 .ico，
+与其往仓库里塞二进制，不如每次构建现生成。"""
+
 ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "packaging"
 FFMPEG_DIR = PKG / "ffmpeg"
@@ -55,7 +59,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):      # 流被换成不支持重配置的（比如某些管道）
         pass
 
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 """版本号。改这里就够了（会写进 macOS 的 Info.plist 和产物文件名）。
 和 `rapp/__init__.py` 里的 `__version__` 保持一致。"""
 
@@ -460,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.skip_ffmpeg:
         fetch_ffmpeg()
     fetch_fonts()
+    make_icons()
     warm_matplotlib_cache()
     print()
     run_pyinstaller(clean=not args.no_clean)

@@ -607,11 +607,13 @@ race-gopro/
 ├── README.md            就是这个文件
 ├── video/               你自己的素材（原始视频、官方圈速表、赛道图），不进仓库
 ├── packaging/           把程序打成独立应用（发 Release 用）
-│   ├── build.py         一键：下 ffmpeg → PyInstaller → 压 zip
+│   ├── build.py         一键：下 ffmpeg / 字体 → 生成图标 → PyInstaller → 压 zip
 │   ├── race-gopro.spec  PyInstaller 配置（怎么装包、Info.plist 写什么）
 │   ├── entry.py         打包用的入口脚本
+│   ├── icon.py          应用图标（代码画的，生成 .ico / .icns）
 │   ├── ffmpeg/          下载缓存的静态 ffmpeg（不进仓库，200 MB）
-│   └── fonts/           下载缓存的开源字体（不进仓库，约 9 MB）
+│   ├── fonts/           下载缓存的开源字体（不进仓库，约 9 MB）
+│   └── icon/            生成的应用图标（不进仓库）
 ├── .github/workflows/   CI：打 tag 自动出 mac + win 两个包并挂 Release
 ├── rapp/                算法全在这个包里
 │   ├── gpmf.py          GPMF 二进制解析（相当于 open()）
@@ -633,7 +635,8 @@ race-gopro/
     ├── test_paths.py                  文件名的跨平台检查（防 Windows checkout 失败）
     ├── test_no_console.py             无控制台启动检查（防 Windows 打包版一启动就弹窗）
     ├── test_subprocess_hygiene.py     子进程检查（防 Windows 上每点一下闪一个黑框）
-    └── test_hud_fonts.py              HUD 字体检查（防字体悄悄退化成 11px 位图）
+    ├── test_hud_fonts.py              HUD 字体检查（防字体悄悄退化成 11px 位图）
+    └── test_icon.py                   应用图标检查（防某个尺寸画成空白）
 ```
 
 数据在包里是这么往下流的（想加功能就沿着这条链找）：
@@ -943,6 +946,15 @@ CI 上挂掉怎么查：Actions → 那次运行 → 点红色那个 job → 展
   用的是 **Noto Sans SC + Noto Sans Mono**：SIL OFL 1.1 授权允许随程序分发 ——
   **微软雅黑 / Consolas 不行**，那是微软的专有字体，授权不允许跟着别人的程序走。
   `packaging/fonts/LICENSE-OFL.txt` 是必须随字体附上的授权原文，**删它之前先看条款**。
+- **Windows 的候选必须“常规字重”在前**。表里原来是 `msyhbd.ttc`（雅黑**粗体**）
+  打头，于是 Windows 上的 HUD 一直比 mac 粗一整档（mac 用 Hiragino 常规），用户
+  一眼就看出来了。名字里带 `bd` / `-B` 的都是粗体，别再把它们排前面。
+- **图标也是代码画的**（`packaging/icon.py`）：深色圆角方块 + 一面方格旗，配色取自
+  HUD。构建时现生成 `.ico`（Windows）和 `.icns`（macOS，用系统自带的 `iconutil`
+  打包），所以仓库里不用存二进制。
+  ⚠ 第一版画的是“带起伏的青色环”，结果看起来像**卷尺** —— 图标要挑一眼认得出的
+  符号，别用中性的几何形状。`tests/test_icon.py` 盯着“每个尺寸都画出来了、
+  而且不是纯色”。
 - 字体走 **jsDelivr** 下（多个镜像域名挨个试）：实测主域名 `cdn.jsdelivr.net`
   在国内 DNS 直接失败，而 `raw.githubusercontent.com` 也連不上 —— 但
   `fastly.jsdelivr.net` 很快。（GitHub 的 Release 附件走

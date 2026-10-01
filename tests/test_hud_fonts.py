@@ -73,10 +73,22 @@ def test_fallback_font_still_scales() -> None:
     )
 
 
-def test_windows_candidates_are_present() -> None:
-    """Windows 的字体必须留在候选表里 —— 当初就是漏了它。"""
-    assert "msyhbd.ttc" in overlay._FONT_NAMES, "候选表里没有微软雅黑"
-    assert "consolab.ttf" in overlay._MONO_NAMES, "候选表里没有 Consolas"
+def test_windows_prefers_regular_weight() -> None:
+    """
+    Windows 的候选必须**常规字重在前**。
+
+    踩过的坑：这张表原本是 `msyhbd.ttc`（雅黑**粗体**）打头，于是 Windows 上的
+    HUD 一直比 mac 粗一整档（mac 用的是 Hiragino 常规），用户一眼就看出来了。
+    名字里带 `bd` / `-B` 的都是粗体，别再把它们排前面。
+    """
+    assert overlay._SANS_WINDOWS[0] == "msyh.ttc", (
+        f"Windows 第一个正文字体是 {overlay._SANS_WINDOWS[0]}，应该用雅黑常规")
+    assert overlay._MONO_WINDOWS[0] == "consola.ttf", (
+        f"Windows 第一个等宽字体是 {overlay._MONO_WINDOWS[0]}，应该用 Consolas 常规")
+    for names in (overlay._SANS_WINDOWS, overlay._MONO_WINDOWS):
+        bold = [n for n in names if "bd" in n.lower() or "-b" in n.lower()]
+        assert len(bold) < len(names), f"{names} 里全是粗体？"
+        assert names[0] not in bold, f"{names[0]} 是粗体，不该排第一"
 
 
 def test_bundled_fonts_dont_hijack_system_fonts() -> None:
@@ -109,6 +121,38 @@ def test_bundled_font_is_the_last_resort() -> None:
     assert got == str(bundled / "NotoSansSC-Regular.otf"), f"兜底失败，选中了 {got}"
 
 
+def test_bundled_dir_in_macos_app_layout(tmp_path: Path) -> None:
+    """
+    macOS 的 .app 里，字体的落点是 Contents/Resources/fonts，
+    而 PyInstaller 6 的 sys._MEIPASS 指向 Contents/Frameworks。
+
+    只认 _MEIPASS/fonts 的话，mac 上永远找不到自带字体 —— 而且**看不出来**：
+    它会静默退回系统字体（Hiragino），画面很正常，只是保底是空的。
+    Windows 的 onedir 布局则确实是 _MEIPASS/fonts。
+    """
+    contents = tmp_path / "X.app" / "Contents"
+    fonts = contents / "Resources" / "fonts"
+    fonts.mkdir(parents=True)
+    (fonts / "NotoSansSC-Regular.otf").write_bytes(b"x")
+    (contents / "MacOS").mkdir()
+    (contents / "Frameworks").mkdir()
+
+    saved_exe = sys.executable
+    had_meipass = hasattr(sys, "_MEIPASS")
+    saved_meipass = getattr(sys, "_MEIPASS", None)
+    try:
+        sys.executable = str(contents / "MacOS" / "race-gopro")
+        sys._MEIPASS = str(contents / "Frameworks")      # noqa: SLF001
+        got = overlay._bundled_font_dir()
+    finally:
+        sys.executable = saved_exe
+        if had_meipass:
+            sys._MEIPASS = saved_meipass                 # noqa: SLF001
+        elif hasattr(sys, "_MEIPASS"):
+            del sys._MEIPASS                             # noqa: SLF001
+    assert got == fonts, f"没找到 .app 里的字体，得到 {got}"
+
+
 def main() -> int:
     failed = 0
 
@@ -138,8 +182,9 @@ def main() -> int:
         print(f"✗ 兜底字体不缩放（{ratio:.1f} 倍）—— 4K 上会看不清")
         failed += 1
 
-    if "msyhbd.ttc" in overlay._FONT_NAMES and "consolab.ttf" in overlay._MONO_NAMES:
-        print("✓ Windows 的字体候选还在表里")
+    if "msyh.ttc" in overlay._FONT_NAMES and "consola.ttf" in overlay._MONO_NAMES:
+        print(f"✓ Windows 候选在表里，且常规字重优先（{overlay._SANS_WINDOWS[0]}"
+              f" / {overlay._MONO_WINDOWS[0]}）")
     else:
         print("✗ Windows 的字体候选被删了")
         failed += 1

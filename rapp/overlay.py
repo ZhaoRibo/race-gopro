@@ -73,13 +73,17 @@ _PANEL = (8, 12, 18, 150)
 # 字体（用户自己装的），要是把 Windows 那批名字排在前面，mac 上就会去用那个 ——
 # 而 HUD 的版面是按 Hiragino 的度量调过的，换字体会让版面变样。
 _SANS_WINDOWS = [
-    "msyhbd.ttc", "msyh.ttc",              # 微软雅黑（粗 / 常规）
+    # 常规字重优先。粗体在 4K 画面上又黑又糊，观感远不如 mac 的 Hiragino
+    # （那是常规字重）。之前把 `msyhbd`（雅黑**粗体**）写在最前面，于是
+    # Windows 上的 HUD 一直比 mac 粗一整档 —— 用户一眼就看出来了。
+    # 名字里的 `bd` / `-B` 就是 Bold，别再把它们排前面。
+    "msyh.ttc",                             # 微软雅黑（常规，最接近 Hiragino 的观感）
+    "msyi.ttf",                             # 等线 DengXian（笔画更细，也很干净）
     "simhei.ttf",                           # 黑体
-    "msjhbd.ttc", "msjh.ttc",               # 微软正黑（繁体，同样含汉字）
-    "simsunb.ttf", "simsun.ttc",            # 宋体
-    "msyi.ttf",                             # 等线
-    "YuGothB.ttc", "YugothB.ttc",           # 日文哥特体（汉字同源，能用）
-    "arialbd.ttf", "arial.ttf",             # 纯拉丁：中文会变方块，但至少能读
+    "msjh.ttc",                             # 微软正黑（繁体，同样含汉字）
+    "simsun.ttc",                           # 宋体
+    "YuGothR.ttc", "YugothR.ttc",           # 日文哥特常规（汉字同源，能用）
+    "arial.ttf", "arialbd.ttf",             # 纯拉丁：中文会变方块，但至少能读
 ]
 _SANS_MACOS = [
     "Hiragino Sans GB.ttc",
@@ -96,10 +100,12 @@ _SANS_LINUX = [
     "truetype/dejavu/DejaVuSans-Bold.ttf",
 ]
 # 大号数字走等宽，计时器跳动时才不会左右抖 —— 所以这几个必须找得到
+# （同样常规字重优先：mac 那边用的是 SFNSMono 常规）
 _MONO_WINDOWS = [
-    "consolab.ttf", "consola.ttf",          # Consolas（Windows 自带）
+    "consola.ttf",                          # Consolas（Windows 自带，等宽）
+    "consolab.ttf",
     "lucon.ttf",                             # Lucida Console
-    "courbd.ttf", "cour.ttf",                # Courier New
+    "cour.ttf", "courbd.ttf",                # Courier New
 ]
 _MONO_MACOS = [
     "SFNSMono.ttf",
@@ -150,10 +156,24 @@ _MONO_HINTS = ("consol", "lucon", "cour", "mono", "menlo", "sfns")
 
 
 def _bundled_font_dir() -> Path | None:
-    """包里自带的那份字体在哪。"""
+    """
+    包里自带的那份字体在哪。
+
+    各平台的落点不一样，不能只认一个：
+      * Windows（onedir）：就在 _MEIPASS/fonts
+      * macOS（.app）：datas 落在 Contents/Resources/，而 PyInstaller 6 的
+        _MEIPASS 指向 Contents/Frameworks —— 只认 _MEIPASS/fonts 的话在 mac 上
+        永远找不到，会静默退回系统字体（看着正常，保底是空的）。
+    """
+    cands: list[Path] = []
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
-        d = Path(meipass) / "fonts"           # PyInstaller 解到 _MEIPASS/fonts
+        cands.append(Path(meipass) / "fonts")
+        cands.append(Path(meipass).parent / "Resources" / "fonts")
+    exe = Path(sys.executable)
+    cands.append(exe.parent / "fonts")                                # onedir 旁边
+    cands.append(exe.parent.parent / "Resources" / "fonts")          # .app 里
+    for d in cands:
         if d.is_dir():
             return d
     # 源码模式：直接用构建时下好的那份，让本地和打出来的包行为一致

@@ -50,5 +50,5 @@ if sys.stdout is None or sys.stderr is None:
     if sys.__stderr__ is None:
         sys.__stderr__ = _sink
 
-__version__ = "0.1.7"
+__version__ = "0.1.8"
 """包版本。发版时和 `packaging/build.py` 里的 `VERSION` 保持一致。"""

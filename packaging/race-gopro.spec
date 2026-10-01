@@ -59,6 +59,12 @@ datas.append((str(_FONT_DIR), "fonts"))
 if not (_FONT_DIR / "LICENSE-OFL.txt").exists():
     print("⚠ 没有 OFL 授权原文，发包前补一份（fonts/LICENSE-OFL.txt）")
 
+# ---- 应用图标（build.py 调 packaging/icon.py 生成）----
+_ICON = ROOT / "packaging" / "icon" / ("race-gopro.ico" if sys.platform == "win32"
+                                        else "race-gopro.icns")
+if not _ICON.exists():
+    raise SystemExit(f"缺少图标 {_ICON} —— 先跑 packaging/build.py（它会生成）")
+
 a = Analysis(                          # noqa: F821
     [str(ROOT / "packaging" / "entry.py")],
     pathex=[str(ROOT)],                # 让 PyInstaller 找得到仓库根的 analyze.py
@@ -97,6 +103,7 @@ exe = EXE(                             # noqa: F821
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(_ICON),                   # Windows 的可执行文件图标（mac 靠下面的 BUNDLE）
 )
 
 coll = COLLECT(                        # noqa: F821
@@ -112,7 +119,7 @@ if sys.platform == "darwin":
     app = BUNDLE(                      # noqa: F821
         coll,
         name=f"{APP_NAME}.app",
-        icon=None,
+        icon=str(_ICON),
         bundle_identifier="local.race-gopro.launcher",
         info_plist={
             "CFBundleName": "卡丁车遥测分析",
