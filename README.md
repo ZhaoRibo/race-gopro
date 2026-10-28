@@ -48,6 +48,7 @@ RaceChrono、Telemetry Overlay 这些专业圈速软件读的也是这条流。
   - [最外层](#最外层)
   - [单圈 HUD 视频：在看板里点一下就出](#单圈-hud-视频在看板里点一下就出)
   - [计时线也能在看板里直接挪](#计时线也能在看板里直接挪)
+  - [在 iPad 上离线看（单文件版）](#在-ipad-上离线看单文件版)
 - [怎么读这些数据](#怎么读这些数据)
   - [圈速](#圈速)
   - [理论最佳圈 vs 连续分段最佳](#理论最佳圈-vs-连续分段最佳)
@@ -292,6 +293,7 @@ video/GX010046_out/          ← 就在源视频旁边
 | 文件                 | 说明                                                                                                         |
 | -------------------- | ------------------------------------------------------------------------------------------------------------ |
 | `dashboard.html`   | 网页看板，**分析的入口**。双击就能打开，数据已内嵌，不需要服务器。图表都是可交互的（点图例可隐藏某圈） |
+| `dashboard_offline.html` | **单文件离线版看板**：图表以图片形式内嵌进这一个文件，不联网、不需要服务，AirDrop 到 iPad 或发给朋友直接看（见下） |
 | `<视频名>_hud.mp4` | 带 HUD 的叠加视频（需要加 `--overlay`）                                                                    |
 | `<视频名>_hud_lap8.mp4` | 单圈 HUD 视频，在看板里点出来的（见下）                                                              |
 
@@ -384,6 +386,23 @@ video/GX010046_out/          ← 就在源视频旁边
 - **出片任务在跑的时候不能改计时线** —— 圈号会变，正在生成的片段会和新的圈号对不上
 - 命令行那条路照旧：`--list-gates` / `--gate-time` / `--gate-index` / `--gate 纬,经`
   随时能用，两种方式效果一样（都走 `laps.compute_lapset`）
+
+### 在 iPad 上离线看（单文件版）
+
+每次分析都会顺带生成一份 **`dashboard_offline.html`**（约 2–4 MB）。它把 7 张图表
+以图片形式内嵌进同一个文件，**不联网、不需要本地服务**，用法就一步：
+
+> 从 Mac 的 Finder 里 **AirDrop 到 iPad** → 在「文件」里点开 →
+> 用能跑 JS 的文件管理器打开（推荐免费的 **Documents by Readdle**；
+> iPadOS 的 Safari 不能直接打开本地文件）。
+
+能看到：汇总卡片、7 张图表（点开看大图）、逐弯表和逐圈明细表。
+用不了：生成 HUD 视频、改计时线（这些要调 Mac 上的 ffmpeg）；CSV / JSON 也没
+打进去（它们在 Mac 的 `tables/` 里）。
+
+> **为什么图表变成了静态图**：离线版故意不加载 Chart.js —— 否则在赛道边没网时
+> 图表会一片空白。要可缩放、能点图例的交互图，还是用 Mac 上的 `dashboard.html`。
+> 一个文件也方便直接发给朋友：赛道位置和成绩都在里面，发之前想一下隐私。
 
 ---
 
@@ -631,7 +650,7 @@ race-gopro/
 │   ├── analysis.py      弯道识别、摩擦圆、delta 曲线
 │   ├── report.py        终端报表 + CSV/JSON 导出
 │   ├── charts.py        matplotlib 图表
-│   ├── dashboard.py     交互式网页看板
+│   ├── dashboard.py     交互式网页看板（含单文件离线版）
 │   ├── overlay.py       HUD 叠加视频
 │   ├── serve.py         本地小服务（出片 / 改计时线）
 │   ├── app.py           网页应用的入口：选视频 → 分析 → 跳看板
@@ -644,6 +663,7 @@ race-gopro/
     ├── test_subprocess_hygiene.py     子进程检查（防 Windows 上每点一下闪一个黑框）
     ├── test_hud_fonts.py              HUD 字体检查（防字体悄悄退化成 11px 位图）
     ├── test_hud_map.py                HUD 实时轨迹小地图检查（防轨迹画到画面外）
+    ├── test_offline_html.py           单文件离线看板检查（防图表没嵌进去 / 漏了服务按钮）
     └── test_icon.py                   应用图标检查（防某个尺寸画成空白）
 ```
 
@@ -749,6 +769,14 @@ macOS 允许文件名里带反斜杠、末尾带空格，Windows 不允许 —�
 
 ```bash
 .venv/bin/python -m tests.test_hud_map
+```
+
+`tests/test_offline_html.py` 盯的是**单文件离线版**：图表必须真的以 base64 嵌进
+HTML（不是链接到 `charts/`）、离线版不许请求 CDN、出片和改计时线那些依赖服务的
+区块要藏掉。这两件事坏了都不会报错，只会"打开发现图表是空的"：
+
+```bash
+.venv/bin/python -m tests.test_offline_html
 ```
 
 想用 pytest 的话得先装（它不在运行依赖里）：

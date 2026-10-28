@@ -282,7 +282,8 @@ class _State:
 
                 charts.make_all(sa, self.outdir / "charts")
             if self.write_dashboard:
-                dashboard.build(sa, self.outdir / "dashboard.html", hud_pad=PAD_SECONDS)
+                # 两份一起重写：改完计时线后，离线版不能还是旧圈号
+                dashboard.build_pair(sa, self.outdir, hud_pad=PAD_SECONDS)
 
             self.sa = sa
             best = sa.lapset.best_lap
@@ -448,6 +449,9 @@ def make_handler(session: Session) -> type[BaseHTTPRequestHandler]:
             """把 URL 映射到输出目录里的文件。"""
             if url_path in ("/", "/dashboard.html", "/index.html"):
                 return state.outdir / "dashboard.html"
+            if url_path == "/dashboard_offline.html":
+                # 单文件离线版（图表已内嵌）：看板上那个「离线版」链接指向它
+                return state.outdir / "dashboard_offline.html"
             for folder in ("charts", "tables"):
                 if url_path.startswith(f"/{folder}/"):
                     # 只保留最后一段文件名：'../' 之类的目录成分直接被丢掉

@@ -13,6 +13,9 @@
 
 数据直接以 JSON 内嵌在 HTML 里，不需要服务器，也不怕文件被挪走。
 Chart.js 走 CDN，联网即可；离线时页面会给出提示（其余表格内容仍然可看）。
+
+另有**单文件离线版**（`dashboard_offline.html`）：图表改成内嵌的静态大图，
+不联网、不需要服务，AirDrop 到 iPad 上也能直接打开。由 `build_pair()` 一次生成。
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ _TEMPLATE = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+__CHARTJS_TAG__
 <style>
   :root{
     --bg:#0e1117; --panel:#161b22; --line:#232a33;
@@ -151,14 +154,45 @@ _TEMPLATE = r"""<!DOCTYPE html>
            padding:5px 9px;border-radius:7px;border:1px solid transparent;}
   .files a:hover{background:#1c2430;border-color:var(--line);}
   .files a span{color:var(--dim);margin-left:8px;font-size:11.5px;}
+
+  /* ---- 离线单文件版（dashboard_offline.html）----
+     这一版不联网、也不需要本地服务：交互图换成内嵌的静态大图，
+     出片 / 改计时线这些依赖服务的区块直接藏掉。
+     模板只有一份，靠 <body class="offline"> 切换 —— 别为它再抄一份 HTML。 */
+  .offbanner{display:none;}
+  body.offline .offbanner{display:block;}
+  .offbanner{background:#1c2430;border:1px solid var(--line);border-radius:10px;
+             padding:11px 14px;margin-bottom:16px;color:var(--dim);
+             font-size:12.5px;line-height:1.7;}
+  .offbanner b{color:var(--fg);}
+  .shots details{border:1px solid var(--line);border-radius:10px;padding:9px 12px;
+                 margin-bottom:9px;background:#12171f;}
+  .shots summary{cursor:pointer;font-size:13px;outline:none;}
+  .shots summary span{color:var(--dim);margin-left:8px;font-size:11.5px;}
+  .shots img{display:block;width:100%;height:auto;margin-top:10px;
+             border-radius:7px;background:#fff;}
+  body.offline .chartsec,
+  body.offline #hudSec,
+  body.offline #picker,
+  body.offline #gateTool,
+  body.offline .gatebar{display:none;}
+  /* 逐圈明细表的最后一列是「出片」按钮，离线版用不上 */
+  body.offline #tLap th:last-child,
+  body.offline #tLap td:last-child{display:none;}
 </style>
 </head>
-<body>
+<body class="__BODYCLASS__">
 <header>
   <h1>卡丁车遥测分析 <span>__BESTLAP__</span></h1>
   <div class="sub">__SOURCE__ · 共 __NLAPS__ 圈 · 里程 __DIST__ m · __DATE__</div>
 </header>
 <div class="wrap">
+
+  __OFFLINE_BANNER__
+
+  <noscript><div class="warn" style="margin-bottom:16px;">这个页面的表格要靠
+  JavaScript 画出来，而当前阅读器禁用了脚本。请用浏览器打开，或换一个支持 JS
+  的文件管理器（例如 iPad 上的 Documents by Readdle）。</div></noscript>
 
   <div id="nodata"></div>
 
@@ -166,8 +200,10 @@ _TEMPLATE = r"""<!DOCTYPE html>
     __CARDS__
   </div>
 
+  __OFFLINE_GALLERY__
+
   <!-- 赛道俯视图放在最前面：先定下计时线位置，再去选「显示哪几圈」才有意义 -->
-  <section>
+  <section class="chartsec">
     <h2>赛道俯视图</h2>
     <p class="hint">颜色代表速度。白色的短直线是计时线（起点线），标注是识别出的弯道。x/y 轴等比例，所以赛道形状没有变形。<b>想换起点线就点下面的「选择起点线…」</b>——拖到车压过发车线的那一瞬间，看画面确认，再点「用这一帧当起点线」，整场会重新切圈。不改的话它是收着的，不占地方。</p>
     <div class="chartbox wide-square"><canvas id="cMap"></canvas></div>
@@ -225,37 +261,37 @@ _TEMPLATE = r"""<!DOCTYPE html>
     <div class="hudmsg" id="hudMsg"></div>
   </section>
 
-  <section>
+  <section class="chartsec">
     <h2>圈速分布</h2>
     <p class="hint">紫柱是最快圈。虚线是平均圈、理论最佳和连续分段最佳。非正常圈（如出场圈）已从图中移除，避免把纵轴拉开、其余柱子被挤成一条线；它们在下面的表格里仍完整保留。</p>
     <div class="chartbox"><canvas id="cLapTime"></canvas></div>
   </section>
 
-  <section>
+  <section class="chartsec">
     <h2>速度—距离曲线</h2>
     <p class="hint">点击下方图例可以隐藏/显示某几圈。灰色竖带是识别出的弯道区间。曲线越重合，说明走线越一致。</p>
     <div class="chartbox tall"><canvas id="cSpeed"></canvas></div>
   </section>
 
-  <section>
+  <section class="chartsec">
     <h2>相对最快圈的时间差</h2>
     <p class="hint">曲线上升 = 从这一点开始正在丢时间；下降 = 正在把时间追回来。看得最清楚的一栏。</p>
     <div class="chartbox tall"><canvas id="cDelta"></canvas></div>
   </section>
 
-  <section>
+  <section class="chartsec">
     <h2>G-G 图（摩擦圆）</h2>
     <p class="hint">横轴 = 横向 G（左转为正），纵轴 = 纵向 G（加速为正）。两轴等比例，散点围出的外沿就是这条轮胎的抓地力极限。</p>
     <div class="chartbox square"><canvas id="cGG"></canvas></div>
   </section>
 
-  <section>
+  <section class="chartsec">
     <h2>每圈走线</h2>
     <p class="hint">把每一圈的实测轨迹叠在一起（各圈按"距起点线的距离"对齐）。点击图例可以隐藏/显示某几圈。<b>线条几乎重合是正常的</b> —— GPS 单点噪声就有 1~3 米，真实走线差异往往只有零点几米，光看形状分不出差别，要看下面那张偏差图。x/y 轴等比例。</p>
     <div class="chartbox square"><canvas id="cLines"></canvas></div>
   </section>
 
-  <section>
+  <section class="chartsec">
     <h2>每圈走线偏差</h2>
     <p class="hint">每一圈相对<b>平均走线</b>的横向偏移：正 = 在平均线左侧，负 = 右侧。这是看走线差异真正管用的一张 —— 噪声被抵消掉了，差异直接量化成米。</p>
     <div class="chartbox tall"><canvas id="cDev"></canvas></div>
@@ -305,6 +341,8 @@ __FILES__</div>
 })();
 
 const DATA = __DATA__;
+// 离线单文件版：不加载 Chart.js，图表改用内嵌的静态大图（见页面上的静态图表区）
+const OFFLINE_MODE = __OFFLINE_FLAG__;
 // 图表只用有效圈：出场圈通常慢十几秒，画进来会把其他圈压成一堆
 const LAPS = DATA.laps.filter(l => l.valid);
 const SKIPPED = DATA.laps.filter(l => !l.valid).map(l => "#" + l.index).join(", ");
@@ -509,9 +547,12 @@ const isBest = l => BEST && l.index === BEST.index;
 })();
 
 if (typeof Chart === "undefined") {
-  document.getElementById("nodata").innerHTML =
-    '<div class="warn">图表库（Chart.js）加载失败 —— 当前处于离线状态。' +
-    '页面下方的两张表格仍然可以正常查看。联网后刷新即可恢复图表。</div>';
+  // 离线单文件版是故意不带 Chart.js 的（图表已经换成静态大图），别在这里报错吓人
+  if (!OFFLINE_MODE) {
+    document.getElementById("nodata").innerHTML =
+      '<div class="warn">图表库（Chart.js）加载失败 —— 当前处于离线状态。' +
+      '页面下方的两张表格仍然可以正常查看。联网后刷新即可恢复图表。</div>';
+  }
 } else {
 
 const PURPLE = "#a855f7";
@@ -1222,13 +1263,27 @@ _TABLE_FILES = [
 ]
 
 
-def _file_index(outdir: Path) -> str:
+def _file_index(outdir: Path, *, inline: bool = False) -> str:
     """
     生成页尾的"其他文件"区块。
 
-    按磁盘上**实际存在**的文件来列，所以加了 --no-charts / --no-csv
-    之后不会留下点不开的死链接；一个都没有时整块不输出。
+    inline=True 是给单文件离线版用的：图表已经用 _chart_gallery() 以 base64
+    内嵌在正文里，这里不再列 charts/ 链接。CSV 不内嵌（能让文件大一倍，
+    iPad 上也不打开 Excel），只留一句说明。
+
+    联网版这边顺带列一个「离线版」下载链接 —— 只要 dashboard_offline.html
+    在旁边（build_pair 会先建它），页面上就能直接拿。
     """
+    if inline:
+        return (
+            "  <section>\n"
+            "    <h2>原始数据</h2>\n"
+            '    <p class="hint">单文件版没有把 CSV / JSON 打进来（那些是给 Excel / '
+            "pandas 用的），它们在 Mac 上的 <code>tables/</code> 目录里；"
+            "这一页的两张表已经包含同样的内容。</p>\n"
+            "  </section>\n\n"
+        )
+
     groups: list[str] = []
     for folder, title, items in (
         ("charts", "图表（点开看大图）", _CHART_FILES),
@@ -1241,6 +1296,12 @@ def _file_index(outdir: Path) -> str:
         )
         if links:
             groups.append(f"<h3>{title}</h3><div class=\"files\">{links}</div>")
+    if (outdir / "dashboard_offline.html").exists():
+        groups.append(
+            "<h3>离线版</h3><div class=\"files\">"
+            '<a href="dashboard_offline.html">dashboard_offline.html'
+            "<span>单文件，图表内嵌（AirDrop 到 iPad 直接看）</span></a></div>"
+        )
     if not groups:
         return ""
     return (
@@ -1251,6 +1312,48 @@ def _file_index(outdir: Path) -> str:
         "    " + "\n    ".join(groups) + "\n"
         "  </section>\n\n"
     )
+
+
+def _chart_gallery(outdir: Path) -> str:
+    """
+    把 charts/ 里的 PNG **内嵌**成一组可展开的大图（单文件离线版用）。
+
+    为什么要 base64 内嵌：iPad 上只需要 AirDrop 一个 HTML，不用连 charts/ 目录
+    一起带过去。代价是文件大 2~3 MB（7 张图），完全可以接受。
+    用 <details> 收起：七张全展开页面太长，点一张看一张更顺手。
+    """
+    import base64
+
+    items: list[str] = []
+    for name, desc in _CHART_FILES:
+        p = outdir / "charts" / name
+        if not p.exists():
+            continue
+        b64 = base64.b64encode(p.read_bytes()).decode("ascii")
+        opened = " open" if not items else ""
+        items.append(
+            f'<details class="shot"{opened}><summary>{desc}'
+            f'<span>{name}</span></summary>'
+            f'<img src="data:image/png;base64,{b64}" alt="{desc}"></details>'
+        )
+    if not items:
+        return ""
+    return (
+        '  <section class="shots">\n'
+        "    <h2>图表</h2>\n"
+        '    <p class="hint">单文件版把图直接嵌进了文件里（静态大图，点开看）。'
+        "想要可缩放的交互版本，用 Mac 上的 dashboard.html。</p>\n"
+        "    " + "\n    ".join(items) + "\n"
+        "  </section>\n\n"
+    )
+
+
+_OFFLINE_BANNER = (
+    '<div class="offbanner">这是<b>单文件离线版</b>：图表已经内嵌进来，不联网、'
+    "也不需要本地服务，AirDrop 到 iPad 上直接打开就能看。"
+    "「生成 HUD 视频」和「改计时线」在离线版里用不了（它们要调 Mac 上的 ffmpeg）；"
+    "原始 CSV / JSON 也没有打进来，在 Mac 的输出目录里。</div>"
+)
 
 
 def _cards(sa: ana.SessionAnalysis) -> str:
@@ -1329,7 +1432,8 @@ def _check_inline_js(html: str) -> str | None:
 
 
 def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16,
-          points_per_lap: int = 260, hud_pad: float = 5.0) -> Path:
+          points_per_lap: int = 260, hud_pad: float = 5.0,
+          offline: bool = False) -> Path:
     """
     生成单文件 HTML 看板。
 
@@ -1338,10 +1442,17 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16,
 
     hud_pad 是「单圈 HUD 视频」在每圈前后各留的秒数，只影响页面上显示的范围，
     实际出片时以 serve.py 的值为准（两边同一个常量）。
+
+    offline=True 生成的是**单文件离线版**：不加载 Chart.js、图表用 base64
+    内嵌的静态大图、出片 / 改计时线这些依赖本地服务的区块藏起来。给 iPad
+    或发给别人用 —— 一个文件就能看，不用带着 charts/ 和 tables/。
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     ls = sa.lapset
+    chartjs = ("" if offline else
+               '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js">'
+               "</script>")
 
     laps_used = ls.laps[:keep_laps]
     grid = _subsample(ls.grid, points_per_lap)
@@ -1485,18 +1596,24 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16,
     }
 
     t = ls.telemetry
+    title = f"卡丁车遥测分析 — {t.source if t else ''}" + ("（离线版）" if offline else "")
     html = (
         _TEMPLATE
+        .replace("__CHARTJS_TAG__", chartjs)
+        .replace("__BODYCLASS__", "offline" if offline else "")
+        .replace("__OFFLINE_BANNER__", _OFFLINE_BANNER if offline else "")
+        .replace("__OFFLINE_GALLERY__", _chart_gallery(path.parent) if offline else "")
+        .replace("__OFFLINE_FLAG__", "true" if offline else "false")
         .replace("__DATA__", json.dumps(data, ensure_ascii=False, separators=(",", ":")))
         .replace("__PAD__", f"{hud_pad:g}")
         .replace("__CARDS__", _cards(sa))
-        .replace("__TITLE__", f"卡丁车遥测分析 — {t.source if t else ''}")
+        .replace("__TITLE__", title)
         .replace("__SOURCE__", t.source if t else "")
         .replace("__BESTLAP__", laps.format_lap_time(ls.best_lap.duration) if ls.best_lap else "—")
         .replace("__NLAPS__", str(len(ls.laps)))
         .replace("__DIST__", f"{float(t.dist[-1]):.0f}" if t else "—")
         .replace("__DATE__", __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M"))
-        .replace("__FILES__", _file_index(path.parent))
+        .replace("__FILES__", _file_index(path.parent, inline=offline))
     )
     path.write_text(html, encoding="utf-8")
 
@@ -1504,10 +1621,32 @@ def build(sa: ana.SessionAnalysis, path: str | Path, *, keep_laps: int = 16,
     # 而从 Python 这边看文件是正常生成的，根本看不出来。
     err = _check_inline_js(html)
     if err:
-        print(f"  ⚠ 看板内嵌脚本有语法错误，图表将无法显示：{err}")
-        print(f"    （文件已写在 {path}，但用浏览器打开会看到空白图表）")
+        what = "表格和图表" if offline else "图表"
+        print(f"  ⚠ 看板内嵌脚本有语法错误，{what}将无法显示：{err}")
+        print(f"    （文件已写在 {path}，但用浏览器打开会看到空白）")
 
     return path
 
 
-__all__ = ["build"]
+def build_pair(
+    sa: ana.SessionAnalysis, outdir: str | Path, *, keep_laps: int = 16,
+    points_per_lap: int = 260, hud_pad: float = 5.0,
+) -> tuple[Path, Path]:
+    """
+    一次生成两份看板，返回 (dashboard.html, dashboard_offline.html)。
+
+    为什么两份都要：联网版能出片、能改计时线；离线版不联网、不需要服务，
+    一个文件就能 AirDrop 到 iPad。模板只有一份，靠 offline 开关切换。
+
+    先建离线版 —— 联网版的页尾要看到 dashboard_offline.html 在旁边，
+    才会列出「离线版」的下载链接（见 _file_index）。
+    """
+    outdir = Path(outdir)
+    offline = build(sa, outdir / "dashboard_offline.html", keep_laps=keep_laps,
+                    points_per_lap=points_per_lap, hud_pad=hud_pad, offline=True)
+    online = build(sa, outdir / "dashboard.html", keep_laps=keep_laps,
+                   points_per_lap=points_per_lap, hud_pad=hud_pad)
+    return online, offline
+
+
+__all__ = ["build", "build_pair"]

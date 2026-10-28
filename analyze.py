@@ -235,6 +235,7 @@ class Result:
     outdir: Path
     video: Path | None
     html: Path | None
+    html_offline: Path | None
     charts: list[Path]
     tables: list[Path]
     hud_video: Path | None
@@ -299,9 +300,11 @@ def run_analysis(
         figs = charts.make_all(sa, charts_dir)
 
     html: Path | None = None
+    html_offline: Path | None = None
     if not args.no_dashboard:
-        # hud_pad 只是给页面显示用的，实际出片以 serve.py 的常量为准
-        html = dashboard.build(sa, outdir / "dashboard.html", hud_pad=serve.PAD_SECONDS)
+        # hud_pad 只是给页面显示用的，实际出片以 serve.py 的常量为准。
+        # 一次生成两份：联网版（能出片 / 改计时线）和单文件离线版（AirDrop 到 iPad）。
+        html, html_offline = dashboard.build_pair(sa, outdir, hud_pad=serve.PAD_SECONDS)
 
     # ------------------------------------------------------------------
     # HUD 叠加视频
@@ -338,6 +341,8 @@ def run_analysis(
     print(f"\n全部输出位于：{outdir}")
     if html is not None:
         print("  dashboard.html   ← 双击打开，圈速 / G 值 / 弯道分析全在里面")
+    if html_offline is not None:
+        print("  dashboard_offline.html ← 单文件离线版（图表内嵌，AirDrop 到 iPad 直接看）")
     if figs:
         print(f"  charts/          {len(figs)} 张图（想单独看大图就用这些）")
     if tables_written:
@@ -350,6 +355,7 @@ def run_analysis(
         outdir=outdir,
         video=video_path,
         html=html,
+        html_offline=html_offline,
         charts=figs,
         tables=tables_written,
         hud_video=out_video,
