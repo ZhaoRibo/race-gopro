@@ -154,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overlay-crf", type=int, default=20, help="HUD 视频画质，越小越清晰（默认 20）")
     p.add_argument("--overlay-preset", default="medium", help="x264 预设，默认 medium")
     p.add_argument("--no-trace", action="store_true", help="HUD 里不画速度曲线小图")
+    p.add_argument("--no-track", action="store_true",
+                   help="HUD 里不画实时轨迹小地图")
 
     p.add_argument("--serve", action="store_true",
                    help="跑完不退出，把看板挂到本地端口上：这样在看板里能选中某一圈"
@@ -325,6 +327,7 @@ def run_analysis(
             crf=args.overlay_crf,
             preset=args.overlay_preset,
             show_trace=not args.no_trace,
+            show_track=not args.no_track,
             verbose=True,
         )
 
@@ -461,6 +464,7 @@ def main(argv: list[str] | None = None) -> int:
             crf=args.overlay_crf,
             preset=args.overlay_preset,
             show_trace=not args.no_trace,
+            show_track=not args.no_track,
             # 看板里改计时线时要按同一套参数重算，所以这些也得传过去
             sectors=args.sectors,
             grid_step=args.grid_step,

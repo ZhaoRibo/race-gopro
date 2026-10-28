@@ -110,6 +110,7 @@ class _State:
 
     def __init__(self, sa: ana.SessionAnalysis, outdir: Path, video: Path, *,
                  fps: float, crf: int, preset: str, show_trace: bool,
+                 show_track: bool = True,
                  sectors: int = 3, grid_step: float = 1.0,
                  write_csv: bool = True, write_charts: bool = True,
                  write_dashboard: bool = True, app_mode: bool = False) -> None:
@@ -121,6 +122,7 @@ class _State:
         self.crf = crf
         self.preset = preset
         self.show_trace = show_trace
+        self.show_track = show_track
         self.app_mode = app_mode
         """是不是网页应用（rapp/app.py）起的。看板靠它决定要不要跟页面绑生死。"""
         # 重算计时线时要沿用的分析参数（和命令行那一次保持一致）
@@ -349,6 +351,7 @@ class _State:
                 self.video, self.sa, job.out,
                 fps=self.fps, t_range=(job.t0, job.t1),
                 crf=self.crf, preset=self.preset, show_trace=self.show_trace,
+                show_track=self.show_track,
                 verbose=False,
                 progress=lambda p: setattr(job, "pct", p),
                 should_stop=job.stop.is_set,
@@ -396,12 +399,13 @@ class Session:
 
 def build_state(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
                 fps: float = 15.0, crf: int = 20, preset: str = "medium",
-                show_trace: bool = True, sectors: int = 3, grid_step: float = 1.0,
+                show_trace: bool = True, show_track: bool = True,
+                sectors: int = 3, grid_step: float = 1.0,
                 write_csv: bool = True, write_charts: bool = True,
                 write_dashboard: bool = True, app_mode: bool = False) -> _State:
     """把一次分析结果包成服务端状态。--serve 和网页应用都走这里。"""
     return _State(sa, Path(outdir), Path(video), fps=fps, crf=crf,
-                  preset=preset, show_trace=show_trace,
+                  preset=preset, show_trace=show_trace, show_track=show_track,
                   sectors=sectors, grid_step=grid_step,
                   write_csv=write_csv, write_charts=write_charts,
                   write_dashboard=write_dashboard, app_mode=app_mode)
@@ -629,13 +633,14 @@ def bind(handler_cls: type[BaseHTTPRequestHandler], port: int) -> ThreadingHTTPS
 
 def run(sa: ana.SessionAnalysis, outdir: str | Path, video: str | Path, *,
         port: int = 8765, fps: float = 15.0, crf: int = 20,
-        preset: str = "medium", show_trace: bool = True,
+        preset: str = "medium", show_trace: bool = True, show_track: bool = True,
         sectors: int = 3, grid_step: float = 1.0,
         write_csv: bool = True, write_charts: bool = True,
         write_dashboard: bool = True) -> int:
     """起服务并一直阻塞到 Ctrl+C。返回进程退出码。"""
     state = build_state(sa, outdir, video, fps=fps, crf=crf,
                         preset=preset, show_trace=show_trace,
+                        show_track=show_track,
                         sectors=sectors, grid_step=grid_step,
                         write_csv=write_csv, write_charts=write_charts,
                         write_dashboard=write_dashboard)

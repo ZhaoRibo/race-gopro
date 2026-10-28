@@ -22,6 +22,7 @@ Pillow 可以直接调用 FreeType 渲染系统字体，写出带抗锯齿的真
 HUD 布局（以 1080p 为基准，其它分辨率按高度等比缩放）
     左上：圈号 / 本圈计时 / 与最快圈的差距 / 最快圈
     右上：本圈速度曲线 + 最快圈参考线 + 当前位置游标
+    右中：实时轨迹小地图（整条赛道 + 本圈已跑过的轨迹 + 当前位置）
     左下：纵向 G 指示条（向上绿 = 加速，向下红 = 刹车）+ G-G 圆盘与横向 G 数值
     右下：当前时速
 
@@ -56,6 +57,14 @@ _RED = (239, 68, 68, 255)
 _CYAN = (34, 211, 238, 255)
 _AMBER = (245, 158, 11, 255)
 _PANEL = (8, 12, 18, 150)
+
+# 实时轨迹小地图的尺寸（1080p 基准，其它分辨率按高度缩放）
+_MAP_W = 300          # 面板宽度；高度 = 宽度 + 标题栏
+_MAP_HEADER = 40      # 顶部留给「实时轨迹」这行字的高度
+_MAP_PAD = 14         # 轨迹到面板内缘的留白
+_MAP_GAP = 18         # 与上方速度曲线卡之间的间距
+_MAP_AIR = 1.08       # 赛道四周的留白系数（1.0 = 贴着画）
+_MAP_SS = 2           # 动态层（轨迹 + 当前位置点）的超采样倍数
 
 # 【必须优先选含中日韩字形的字体】
 # HUD 里有“最快圈”“纵向 G”这类中文标签。Arial / Helvetica 这些纯拉丁字体
@@ -336,6 +345,9 @@ def _hud_table(
         "a_lat": np.full(n, np.nan),
         "dist": np.full(n, np.nan),
         "delta": np.full(n, np.nan),
+        # 车在平面坐标系里的位置（米）。小地图用它定位，出场圈也要有，所以先全 NaN
+        "x": np.full(n, np.nan),
+        "y": np.full(n, np.nan),
     }
 
     # 全场速度与 G 值（按时间查表）
@@ -356,9 +368,22 @@ def _hud_table(
         # 本圈内已经跑过的距离：时间 → 距离
         d = np.interp(tt, lap.t_start + lap.time, lap.grid)
         out["dist"][m] = d
+        # 车的位置：距离 → 本圈实测走线（gx/gy 与 grid 一一对应）。
+        # 小地图的轨迹和当前位置都取**当前这一圈自己的**走线，
+        # 这样一眼能看出这圈比最快圈偏内还是偏外。
+        if lap.gx is not None and lap.gy is not None:
+            out["x"][m] = np.interp(d, lap.grid, lap.gx)
+            out["y"][m] = np.interp(d, lap.grid, lap.gy)
         # 与最快圈的差距（同样距离处）
         if best is not None and lap is not best:
             out["delta"][m] = np.interp(tt - lap.t_start, best.time, lap.time - best.time)
+
+    # 不在任何一圈里（片头、出场圈、片尾）：直接按时间取整段遥测里的位置。
+    # 这段时间没有"本圈轨迹"可画，小地图上只画一个点。
+    outside = ~valid
+    if outside.any():
+        out["x"][outside] = np.interp(t[outside], tel.t, tel.x)
+        out["y"][outside] = np.interp(t[outside], tel.t, tel.y)
 
     return out
 
@@ -422,6 +447,181 @@ def _g_limits(sa: ana.SessionAnalysis) -> tuple[float, float]:
     return max(1.0, lat), max(0.5, lon)
 
 
+# ==========================================================================
+class _TrackView:
+    """
+    HUD 里的「实时轨迹」小地图：赛道轮廓 + 本圈已跑过的轨迹 + 当前位置。
+
+    为什么要拆成静态 / 动态两层：面板底、赛道轮廓、起点线在一次出片里始终不变，
+    而 4K 下这块面板有 600 像素见方 —— 逐帧重画轮廓纯属浪费。编码本来就是
+    瓶颈（约 51 ms/帧），画 HUD 不该抢它的时间。所以：
+
+        static   面板底 + 平均走线 + 起点线 + 标题，构造时画一次
+        draw()   每帧只画「已经跑过的轨迹」和当前点，叠在 static 上面
+
+    轮廓为什么取**所有圈的平均走线**（和 charts.plot_track_map 同一个理由）：
+    单圈 GPS 有 1~3 m 噪声，只画一圈，赛道形状会又毛糙又变形。
+    但当前位置和轨迹用的是**当前这一圈自己的**实测走线 —— 这样这圈偏内还是偏外
+    一眼能看出来，取平均就看不出来了。
+    """
+
+    def __init__(self, sa: ana.SessionAnalysis, W: int, H: int, fonts: _Fonts) -> None:
+        s = H / 1080.0
+        # 局部函数，和 render_hud_frame 里的 px() 是同一个换算
+        px = lambda v: int(round(v * s))  # noqa: E731
+
+        ls = sa.lapset
+        usable = [l for l in ls.laps if l.gx is not None and l.gy is not None]
+        if not usable:
+            raise ValueError("这份数据里没有可画的轨迹")
+
+        # ---- 面板位置：贴在右上速度曲线卡的正下方，右边缘与它对齐 ----
+        # 为什么不放在两张顶部卡片中间：那点空当是按 16:9 算的；样例素材是
+        # 2704×2028（4:3），两张卡几乎占满整行，中间只剩几十像素。
+        # 右侧这一列在 4:3 / 16:9 下都够宽，而且不挡画面中心的赛道。
+        M = px(38)
+        self.w = px(_MAP_W)
+        self.h = self.w + px(_MAP_HEADER)
+        self.x = W - M - self.w
+        self.y = M + px(196) + px(_MAP_GAP)      # 196 = 速度曲线卡的高度
+        # 画幅特别矮时别压到右下角的时速；真放不下就贴着速度曲线卡往上顶
+        speed_top = H - px(150) - px(172) - px(24)
+        if self.y + self.h > speed_top:
+            self.y = max(M + px(196) + px(_MAP_GAP), speed_top - self.h)
+
+        pad = px(_MAP_PAD)
+        header = px(_MAP_HEADER)
+        side = self.w - 2 * pad
+
+        # ---- 世界坐标 → 面板内像素坐标（等比例，北朝上）----
+        # 等比例是硬要求：不然赛道会被拉成另一种形状，弯道的松紧全看不出来。
+        gx = np.mean([l.gx for l in usable], axis=0)
+        gy = np.mean([l.gy for l in usable], axis=0)
+        xmin, xmax = float(gx.min()), float(gx.max())
+        ymin, ymax = float(gy.min()), float(gy.max())
+        span = max(xmax - xmin, ymax - ymin, 1.0)
+        self._scale = side / (span * _MAP_AIR)
+        self._cx = (xmin + xmax) / 2.0
+        self._cy = (ymin + ymax) / 2.0
+        self._mx = pad + side / 2.0
+        self._my = header + pad + side / 2.0
+
+        self.grid = ls.grid
+        # 每圈的轨迹先在面板坐标里算好；逐帧只做切片，不再碰世界坐标
+        self.laps_px: list[tuple[np.ndarray, np.ndarray] | None] = []
+        for lap in ls.laps:
+            if lap.gx is None or lap.gy is None:
+                self.laps_px.append(None)
+            else:
+                self.laps_px.append(self._to_px(lap.gx, lap.gy))
+
+        # ---- 静态层 ----
+        self.static = Image.new("RGBA", (self.w, self.h), (0, 0, 0, 0))
+        self.static.alpha_composite(
+            _rounded_panel((self.w, self.h), px(14), _PANEL))
+
+        X, Y = self._to_px(gx, gy)
+        step = max(1, gx.size // 600)
+        gate = ls.gate
+        # 起点线：一条垂直于行进方向的短横线（和赛道俯视图上的画法一致）
+        nx, ny = -float(gate.direction[1]), float(gate.direction[0])
+        half = 14.0
+        gx1, gy1 = self._to_px(gate.x + nx * half, gate.y + ny * half)
+        gx2, gy2 = self._to_px(gate.x - nx * half, gate.y - ny * half)
+        line_w = max(1, px(4))
+        gate_w = max(1, px(3))
+
+        def _draw_track(dr: ImageDraw.ImageDraw, ss: int):
+            pts = [(float(X[i]) * ss, float(Y[i]) * ss)
+                   for i in range(0, X.size, step)]
+            if len(pts) >= 2:
+                # 先垫一道深色描边再画浅色线：面板是半透明的（alpha 150），
+                # 正对亮天空时浅色线会糊进背景里 —— 实测在样例视频右上角就是这样。
+                # 描边只画一次（构造时），逐帧没有代价。
+                dr.line(pts, fill=(0, 0, 0, 110),
+                        width=(line_w + px(2)) * ss, joint="curve")
+                dr.line(pts, fill=(255, 255, 255, 120), width=line_w * ss,
+                        joint="curve")
+            dr.line([(float(gx1) * ss, float(gy1) * ss),
+                     (float(gx2) * ss, float(gy2) * ss)],
+                    fill=(0, 0, 0, 110), width=(gate_w + px(2)) * ss)
+            dr.line([(float(gx1) * ss, float(gy1) * ss),
+                     (float(gx2) * ss, float(gy2) * ss)],
+                    fill=_AMBER, width=gate_w * ss)
+
+        self.static.alpha_composite(
+            _smooth_layer((self.w, self.h), _draw_track, ss=3))
+        ImageDraw.Draw(self.static).text(
+            (px(_MAP_PAD), px(8)), "实时轨迹",
+            font=fonts.get(px(22)), fill=_DIM)
+
+        # 逐帧复用的小对象，省得每帧都建
+        self._lw = max(2, px(5))
+        self._dot_r = px(9)
+        self._glow_r = px(15)
+
+    def _to_px(self, wx, wy):
+        """世界坐标（米）→ 面板内像素坐标。"""
+        wx = np.asarray(wx, dtype=np.float64)
+        wy = np.asarray(wy, dtype=np.float64)
+        return (self._mx + (wx - self._cx) * self._scale,
+                self._my - (wy - self._cy) * self._scale)   # 北朝上 → y 轴翻转
+
+    def draw(self, base: Image.Image, lap_no: int, dist: float,
+             wx: float, wy: float) -> None:
+        """把这一帧的小地图叠到 base（整帧 RGBA）上。"""
+        base.alpha_composite(self.static, (self.x, self.y))
+        if not (np.isfinite(wx) and np.isfinite(wy)):
+            return
+
+        ss = _MAP_SS
+        w, h = self.w, self.h
+        layer = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(layer)
+
+        # ---- 本圈已经跑过的轨迹 ----
+        if 1 <= lap_no <= len(self.laps_px) and np.isfinite(dist):
+            pair = self.laps_px[lap_no - 1]
+            if pair is not None:
+                X, Y = pair
+                # grid 上的点按距离排好序，二分找到当前跑到第几个
+                n = int(np.searchsorted(self.grid, dist, side="right")) - 1
+                n = min(max(n, 0), X.size - 1)
+                # 面板只有几百像素宽，1 米一个点画 300 个就够细了；
+                # 再多只是让 PIL 多画几段看不见的折线
+                step = max(1, (n + 1) // 360)
+                pts = [(float(X[i]) * ss, float(Y[i]) * ss)
+                       for i in range(0, n + 1, step)]
+                if len(pts) >= 2:
+                    dr.line(pts, fill=_CYAN, width=self._lw * ss, joint="curve")
+
+        # ---- 当前位置：外圈青色光晕 + 白色实心点 ----
+        cx, cy = (float(v) for v in self._to_px(wx, wy))
+        # 只画落在面板里的点：GPS 刚开始还没定位时坐标是 (0,0) 那一带的远点，
+        # 画到面板外也会被裁掉，但那一串巨大的坐标没必要交给 PIL 去处理。
+        if (np.isfinite(cx) and np.isfinite(cy)
+                and 0.0 <= cx <= w and 0.0 <= cy <= h):
+            cx, cy = cx * ss, cy * ss
+            gr, rr = self._glow_r * ss, self._dot_r * ss
+            dr.ellipse([cx - gr, cy - gr, cx + gr, cy + gr],
+                       fill=(34, 211, 238, 70))
+            dr.ellipse([cx - rr, cy - rr, cx + rr, cy + rr], fill=_WHITE)
+
+        # 缩回面板尺寸再贴上去：轨迹和点都被限制在面板内，不会画到视频画面上。
+        # 用 reduce(整数倍) 而不是 resize(LANCZOS)：同样是盒式平均的抗锯齿，
+        # 但它是 C 里按 2×2 直接求平均，比 LANCZOS 快一个数量级（逐帧调用）。
+        base.alpha_composite(layer.reduce(ss), (self.x, self.y))
+
+
+def make_track_view(
+    sa: ana.SessionAnalysis, W: int, H: int, fonts: _Fonts
+) -> _TrackView | None:
+    """构造小地图。没有轨迹数据时返回 None（老数据 / 合成测试可能没有）。"""
+    if not any(l.gx is not None and l.gy is not None for l in sa.lapset.laps):
+        return None
+    return _TrackView(sa, W, H, fonts)
+
+
 def render_hud_frame(
     k: int,
     hud: dict[str, np.ndarray],
@@ -433,6 +633,7 @@ def render_hud_frame(
     show_trace: bool = True,
     g_lat_max: float = 1.5,
     g_long_max: float = 1.0,
+    track: _TrackView | None = None,
 ) -> Image.Image:
     """画某一帧的 HUD，返回 RGBA 图。"""
     s = H / 1080.0  # 所有尺寸都按这个比例缩放，4K 和 720p 共用同一套布局
@@ -653,6 +854,15 @@ def render_hud_frame(
         d.text((tb_x + px(14), tb_y + px(8)), "本圈速度 / 最快圈参考",
                font=fonts.get(px(22)), fill=_DIM)
 
+    # ------------------------------------------------------------------
+    # 右中：实时轨迹小地图
+    # ------------------------------------------------------------------
+    # 位置和静态部分都在 _TrackView 里算好（见上面的类注释）：
+    # 这里只负责把「本圈跑到哪儿」这部分叠上去。
+    if track is not None:
+        track.draw(base, lap_no, float(hud["dist"][k]),
+                   float(hud["x"][k]), float(hud["y"][k]))
+
     return base
 
 
@@ -671,6 +881,7 @@ def burn(
     crf: int = 20,
     preset: str = "medium",
     show_trace: bool = True,
+    show_track: bool = True,
     verbose: bool = True,
     progress: Callable[[float], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
@@ -704,6 +915,8 @@ def burn(
     n_frames = hud["t"].size
     fonts = _Fonts()
     g_lat_max, g_long_max = _g_limits(sa)
+    # 静态部分（面板、赛道轮廓）在这里一次画好，逐帧只叠动态的轨迹
+    track = make_track_view(sa, W, H, fonts) if show_track else None
 
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -738,7 +951,8 @@ def burn(
                 cancelled = True
                 break
             frame = render_hud_frame(k, hud, sa, W, H, fonts, show_trace=show_trace,
-                                     g_lat_max=g_lat_max, g_long_max=g_long_max)
+                                     g_lat_max=g_lat_max, g_long_max=g_long_max,
+                                     track=track)
             proc.stdin.write(frame.tobytes())
             if progress is not None and k % step == 0:
                 progress(k / n_frames)
@@ -773,4 +987,4 @@ def burn(
     return out_path
 
 
-__all__ = ["Cancelled", "burn", "render_hud_frame", "video_info"]
+__all__ = ["Cancelled", "burn", "make_track_view", "render_hud_frame", "video_info"]

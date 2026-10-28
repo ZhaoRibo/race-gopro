@@ -993,7 +993,7 @@ def run(port: int = 8765, open_browser: bool = True, log_path: Path | None = Non
     """起应用并阻塞到退出。返回进程退出码。"""
     _fix_tool_path()
     hud_args = dict(fps=15.0, crf=20, preset="veryfast", show_trace=True,
-                    sectors=3, grid_step=1.0)
+                    show_track=True, sectors=3, grid_step=1.0)
     app = _App(hud_args, open_browser=open_browser)
     handler = _make_handler(app)
     url = f"http://127.0.0.1:{port}/"
